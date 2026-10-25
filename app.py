@@ -59,7 +59,7 @@ class SWDApp(app.App):
         try:
             fn()
         except Exception as e:
-            self.note(str(e)[:26] or type(e).__name__)
+            self.note(str(e)[:40] or type(e).__name__)
             return False
         if ok:
             self.note(ok)
@@ -173,7 +173,7 @@ class SWDApp(app.App):
         else:
             self.active.draw(self, ctx)
         if self._toast_ms > 0:
-            ui.text(ctx, ui.clip(self._toast, 26), 0, 98, ui.WARN)
+            ui.toast(ctx, self._toast)
         ctx.restore()
         self.draw_overlays(ctx)
 
@@ -183,7 +183,7 @@ class SWDApp(app.App):
         ctx.translate(self._slide * self._slide_dir * 150, 0)
         ui.icon(ctx, t.key, 0, -22, 44, t.colour)
         ui.text(ctx, t.title, 0, 40, ui.TEXT, ui.label_font_size * 1.15)
-        ui.text(ctx, ui.clip(t.summary(self), 26), 0, 66, ui.MUTED)
+        ui.text(ctx, t.summary(self), 0, 66, ui.MUTED)
         ctx.restore()
         ui.chevron(ctx, -100, -10, 1)
         ui.chevron(ctx, 100, -10, -1)

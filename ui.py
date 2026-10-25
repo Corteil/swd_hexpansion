@@ -9,6 +9,7 @@ try:
 except ImportError:  # off the badge (tests)
     small_font_size, label_font_size = 13.5, 19.0
 
+tiny_font_size = small_font_size * 0.8  # status line, toast, dense lists
 TAU = 2 * math.pi
 TEXT = (1, 1, 1)
 MUTED = (0.62, 0.62, 0.68)
@@ -18,15 +19,56 @@ WARN = (1.0, 0.7, 0.1)
 BAD = (1.0, 0.3, 0.3)
 
 
-def clip(s, n):
+def clip(s, n):  # fixed-length shortening; text() already fits to the screen edge
     return s if len(s) <= n else s[:n - 2] + ".."
 
 
-def text(ctx, s, x, y, rgb=TEXT, size=None, align="c"):
+RADIUS = 116  # usable radius of the round display, a little inside the glass
+
+
+def _chord(y, size):
+    """Width of the display at the top and bottom edge of a line of text centred on y."""
+    edge = abs(y) + size / 2
+    return 2 * math.sqrt(max(0.0, RADIUS * RADIUS - edge * edge))
+
+
+def fit(ctx, s, avail, tail=0):
+    """s, shortened with ".." until it is no wider than avail pixels (current font).
+    With tail > 0 the last `tail` characters are kept (so a file extension survives)."""
+    if ctx.text_width(s) <= avail:
+        return s
+    keep = s[-tail:] if tail else ""
+    s = s[:-tail] if tail else s
+    while len(s) > 1 and ctx.text_width(s + ".." + keep) > avail:
+        s = s[:-1]
+    return s + ".." + keep
+
+
+def text(ctx, s, x, y, rgb=TEXT, size=None, align="c", tail=0):
+    """Draw text, shortened if it would run off the round edge of the screen."""
     ctx.font_size = size or small_font_size
     ctx.text_align = ctx.LEFT if align == "l" else ctx.CENTER
     ctx.text_baseline = ctx.MIDDLE
+    chord = _chord(y, ctx.font_size)
+    if align == "l":
+        s = fit(ctx, s, chord / 2 - x, tail)   # from x to the right edge of the chord
+    else:
+        s = fit(ctx, s, chord - 2 * abs(x), tail)
     ctx.rgb(*rgb).move_to(x, y).text(s)
+
+
+def toast(ctx, msg, rgb=WARN):
+    """A message on a dark band near the bottom, wrapped onto two lines if needed."""
+    ctx.font_size = tiny_font_size
+    first, second = msg, ""
+    if ctx.text_width(msg) > _chord(82, tiny_font_size):
+        cut = msg.rfind(" ", 0, 21)
+        if cut > 0:
+            first, second = msg[:cut], msg[cut + 1:]
+    ctx.rgba(0, 0, 0, 0.9).rectangle(-100, 71, 200, 38 if second else 22).fill()
+    text(ctx, first, 0, 82, rgb, tiny_font_size)
+    if second:
+        text(ctx, second, 0, 98, rgb, tiny_font_size)
 
 
 def bar(ctx, x, y, w, h, frac, rgb):
@@ -59,7 +101,7 @@ def chevron(ctx, x, y, direction, rgb=MUTED):
 
 
 def header(ctx, link):
-    text(ctx, clip(link.label(), 22), 0, -104, link.colour())
+    text(ctx, link.label(), 0, -92, link.colour(), tiny_font_size)
 
 
 # --- icons ---------------------------------------------------------------

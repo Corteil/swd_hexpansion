@@ -40,6 +40,12 @@ class SWDError(Exception):
     pass
 
 
+def _fail(msg, detail=""):
+    """Raise SWDError(msg); msg is shown to the user, detail goes to the USB console."""
+    print("swd:", msg, detail)
+    raise SWDError(msg)
+
+
 # GPIO block of the ESP32-S3 (word indexes from 0x60004000, bank 0 / bank 1): OUT set
 # 2/5, OUT clear 3/6, output-enable set 9/12, clear 10/13, input 15/16. Everything the
 # bit loop needs lives in one array so a call passes a single argument:
@@ -279,7 +285,7 @@ class SWD:
             if ack == ACK_OK:
                 if rnw:
                     if not cfg[9]:
-                        raise SWDError("parity error")
+                        _fail("Bad data on the SWD line", "parity error")
                     return cfg[8]
                 return None
             if ack == ACK_WAIT:
@@ -288,10 +294,10 @@ class SWD:
             if ack == ACK_FAULT:
                 # sticky error: clear it so the next transfer can work
                 self._xfer(0, 0, DP_ABORT, 0x1E, retries=1)
-                raise SWDError("FAULT (sticky errors cleared)")
+                _fail("Target reported an error", "FAULT, sticky errors cleared")
             # ACK 0b111 (all ones) = nothing drove the line: wiring/power/state
-            raise SWDError("bad ACK=%d (no target?)" % ack)
-        raise SWDError("too many WAITs")
+            _fail("No reply: check wiring and power", "bad ACK=%d" % ack)
+        _fail("Target busy, gave up", "too many WAITs")
 
     def dp_read(self, addr):
         return self._xfer(0, 1, addr)
@@ -335,7 +341,7 @@ class SWD:
                 break
             time.sleep_ms(1)
         else:
-            raise SWDError("debug power-up timeout")
+            _fail("Target debug will not power up", "CTRLSTAT power-up ack timeout")
         return dpidr
 
     # ---- memory access via MEM-AP (32-bit, auto-increment) ----
@@ -406,7 +412,7 @@ class SWD:
             i += chunk
         if self.dp_read(DP_CTRLSTAT) & 0x20:         # STICKYERR
             self.dp_write(DP_ABORT, 0x1E)
-            raise SWDError("write failed (STICKYERR)")
+            _fail("Memory write failed", "STICKYERR")
 
     # ---- core control (Cortex-M33 debug registers) ----
     def halt(self):
@@ -415,7 +421,7 @@ class SWD:
             if self.read32(DHCSR) & S_HALT:
                 return
             time.sleep_ms(1)
-        raise SWDError("core did not halt")
+        _fail("Could not halt the CPU", "DHCSR.S_HALT not set")
 
     def resume(self):
         self.write32(DHCSR, DBGKEY | C_DEBUGEN)
@@ -438,7 +444,7 @@ class SWD:
             if self.read32(DHCSR) & S_REGRDY:
                 return
             time.sleep_ms(1)
-        raise SWDError("register write timeout")
+        _fail("CPU register access timed out", "DCRSR write, S_REGRDY not set")
 
     def call(self, func, args=(), sp=0x20041000, bkpt=0x20040000, timeout_ms=5000):
         """Run func(*args) on the halted core and return R0. The function returns into a
@@ -455,8 +461,23 @@ class SWD:
         while not self.read32(DHCSR) & S_HALT:
             if time.ticks_diff(time.ticks_ms(), t) > timeout_ms:
                 self.write32(DHCSR, DBGKEY | C_DEBUGEN | C_HALT)
-                raise SWDError("call to %08X timed out" % func)
+                _fail("Flash routine timed out", "call to %08X" % func)
         return self.read_reg(0)
+
+    def release_core1(self):
+        """Let core 1 run. A debugger session (OpenOCD halts both cores) can leave it halted,
+        or with a reset vector catch that halts it on every reset; the timers pause while
+        either core is halted, so a program that waits on a timer then never gets going.
+        Only meaningful for the ADIv6 RP2350 (core 1 is the AP at 0x4000)."""
+        if self.adiv != 6:
+            return
+        core0 = self.ap_base
+        try:
+            self.mem_setup(AP_BASE_CORE1, 6)
+            self.write32(DEMCR, DEMCR_TRCENA)
+            self.write32(DHCSR, DBGKEY)   # no halt, debug off: run
+        finally:
+            self.mem_setup(core0, 6)
 
     def reset_halt(self, targetsel=None):
         """Reset the chip and catch the core at its first instruction (DEMCR.VC_CORERESET), so
@@ -472,7 +493,7 @@ class SWD:
                 break
             time.sleep_ms(5)
         else:
-            raise SWDError("core did not halt out of reset")
+            _fail("Could not halt the CPU", "no halt out of reset")
         self.write32(DEMCR, DEMCR_TRCENA)
 
     def read_reg(self, n):
@@ -482,4 +503,4 @@ class SWD:
             if self.read32(DHCSR) & S_REGRDY:
                 return self.read32(DCRDR)
             time.sleep_ms(1)
-        raise SWDError("register read timeout")
+        _fail("CPU register access timed out", "DCRSR read, S_REGRDY not set")

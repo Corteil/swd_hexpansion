@@ -34,6 +34,12 @@ class FlashError(Exception):
     pass
 
 
+def _fail(msg, detail=""):
+    """Raise FlashError(msg); msg is shown to the user, detail goes to the USB console."""
+    print("flash:", msg, detail)
+    raise FlashError(msg)
+
+
 def _code(a, b):
     return ord(a) | (ord(b) << 8)
 
@@ -49,7 +55,7 @@ def windows(path):
             if wbase != base:
                 if base is not None:
                     if wbase < base:
-                        raise FlashError("image blocks are not in ascending order")
+                        _fail("File is not in address order", "UF2 blocks go backwards")
                     yield base, buf
                 base, buf = wbase, bytearray(b"\xff" * SECTOR)
             n = min(len(data), SECTOR - (addr - base))
@@ -71,14 +77,14 @@ class Flasher:
         swd = self.swd
         table_lookup = (swd.read32(0x14) >> 16) & 0xFFFF   # 16-bit pointer at 0x16
         if not 0x20 <= table_lookup < 0x8000:
-            raise FlashError("no bootrom function table")
+            _fail("Flash routines not found", "no bootrom function table")
         for name, code in (("connect", _code("I", "F")), ("exit_xip", _code("E", "X")),
                            ("erase", _code("R", "E")), ("program", _code("R", "P")),
                            ("flush", _code("F", "C")), ("enter_xip", _code("C", "X")),
                            ("state_reset", _code("S", "R"))):
             addr = swd.call(table_lookup, (code, RT_ARM_SEC), sp=STACK_TOP)
             if not addr:
-                raise FlashError("bootrom has no %s function" % name)
+                _fail("Flash routines not found", "bootrom has no %s function" % name)
             self.fn[name] = addr
 
     def prepare(self):
@@ -88,6 +94,7 @@ class Flasher:
         redundancy coprocessor, which the boot code would normally set up), and clear the
         bootrom's per-core state. Sequence taken from a logic-analyser capture of OpenOCD."""
         swd = self.swd
+        swd.release_core1()
         swd.reset_halt()
         swd.write32(ACCESSCTRL_CFGRESET, 0xACCE0001)
         swd.write_block(CODE, RCP_INIT)
@@ -129,14 +136,14 @@ class Flasher:
         for base, buf in windows(path):
             got = self.swd.read_block(base, SECTOR // 4)
             if struct.pack("<%dI" % (SECTOR // 4), *got) != bytes(buf):
-                raise FlashError("verify failed near %08X" % base)
+                _fail("Verify failed at %08X" % base)
             done += SECTOR
             yield min(1.0, done / total)
 
     def run(self, path):
         info = uf2.check(path)
         if info["start"] is None or info["start"] < XIP or info["end"] > XIP + self.flash_size:
-            raise FlashError("image is outside flash")
+            _fail("File does not fit in flash", "image %s to %s" % (info["start"], info["end"]))
         total = ((info["end"] - (info["start"] & ~(SECTOR - 1))) + SECTOR - 1) // SECTOR * SECTOR
         yield 0, 0.0
         self.prepare()

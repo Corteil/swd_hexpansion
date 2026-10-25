@@ -52,12 +52,16 @@ def describe(path):
         size = os.stat(path)[6]
         if path.lower().endswith(".uf2"):
             with open(path, "rb") as f:
-                head = f.read(32)
-            if len(head) < 32:
-                return ["%s" % human(size), "too short for UF2"]
-            m0, m1, _flags, addr, _n, _blk, blocks, fam = struct.unpack("<8I", head)
-            if m0 != UF2_MAGIC0 or m1 != UF2_MAGIC1:
-                return ["%s" % human(size), "not a UF2 file"]
+                for _ in range(3):   # the SDK puts an "absolute" family block first: skip it
+                    head = f.read(32)
+                    f.seek(f.tell() + 480)
+                    if len(head) < 32:
+                        return ["%s" % human(size), "too short for UF2"]
+                    m0, m1, _flags, addr, _n, _blk, blocks, fam = struct.unpack("<8I", head)
+                    if m0 != UF2_MAGIC0 or m1 != UF2_MAGIC1:
+                        return ["%s" % human(size), "not a UF2 file"]
+                    if fam != 0xE48BFF57:
+                        break
             where = "" if addr == 0x10000000 else " @ %X" % addr
             return ["%s  %d blocks" % (human(size), blocks),
                     FAMILIES.get(fam, "family %08X" % fam) + where]
@@ -201,7 +205,7 @@ class FilesTile(Tile):
                 if self.pick_from:
                     app.close_picker()
                 else:
-                    app.note("Selected for Flash")
+                    app.note("File ready to flash")
         else:
             for ch in "abcdefghijklmnopqrstuvwxyz":
                 key = app.keyboard.get(ch.upper())
@@ -226,7 +230,7 @@ class FilesTile(Tile):
                 ctx.rgb(*ui.DIM).rectangle(-92, y - 10, 184, 20).fill()
             mark = "/" if is_dir else ("*" if full == app.selected else " ")
             colour = self.colour if is_dir else ui.TEXT
-            ui.text(ctx, ui.clip(label + ("/" if is_dir else ""), 20) + (" *" if mark == "*" else ""), -84, y, colour, align="l")
+            ui.text(ctx, ("* " if mark == "*" else "") + label + ("/" if is_dir else ""), -84, y, colour, align="l", tail=0 if is_dir else 7)
         cur = p.current()
         if cur and not cur[2]:
             for k, line in enumerate(describe(cur[1])):

@@ -16,9 +16,10 @@ class Link:
         self.leds = None
 
     def label(self):
-        if self.idcode is None:
-            return self.state
-        return "%s  %08X" % (self.state, self.idcode)
+        """Short enough for the top edge of the round display."""
+        if self.target is not None:
+            return "%s %s" % (self.target.name, self.state)
+        return self.state
 
     def colour(self):
         return {"connected": ui.OK, "running": ui.OK, "halted": ui.WARN}.get(self.state, ui.MUTED)
@@ -52,7 +53,7 @@ class Link:
                 error = e
                 continue
             if self.choice < 0 and t.dpidr is not None and dpidr != t.dpidr:
-                error = ValueError("DPIDR %08X" % dpidr)
+                error = ValueError("Unknown chip, debug ID %08X" % dpidr)
                 continue
             self.swd.mem_setup(t.ap_base, t.adiv)
             self.target, self.idcode = t, dpidr

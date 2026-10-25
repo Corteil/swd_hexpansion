@@ -14,13 +14,13 @@ SPEEDS = ((0, "max"), (1, "fast"), (4, "medium"), (20, "slow"))  # (delay_us, la
 
 
 def _need_link(app):
-    app.note("SWD driver not wired yet")
+    app.note("Not available yet")
 
 
 def _linked(app):
     """The SWD driver once connected, else a pop-up and None."""
     if app.link.swd is None or app.link.target is None:
-        app.note("Connect first")
+        app.note("Not connected")
         return None
     return app.link.swd
 
@@ -39,7 +39,7 @@ class ConnectTile(ListTile):
         from .targets import TARGETS
         link = app.link
         name = "auto" if link.choice < 0 else TARGETS[link.choice].name
-        return ["Connect", "< Target: %s >" % name, "Read IDCODE", "Disconnect"]
+        return ["Connect", "< Target: %s >" % name, "Read debug ID", "Disconnect"]
 
     def adjust(self, app, i, d):
         from .targets import TARGETS
@@ -54,7 +54,7 @@ class ConnectTile(ListTile):
         elif i == 2:
             swd = _linked(app)
             if swd:
-                app.attempt(lambda: app.note("DPIDR %08X" % swd.dp_read(0)))
+                app.attempt(lambda: app.note("Debug ID %08X" % swd.dp_read(0)))
         elif i == 3:
             link.close()
 
@@ -111,7 +111,7 @@ class FlashTile(Tile):
             self.gen = None
         except Exception as e:  # FlashError, SWDError, a bad file
             self._stop(app)
-            app.note(str(e)[:26] or type(e).__name__)
+            app.note(str(e)[:40] or type(e).__name__)
             return
         if self.stage >= len(STAGES):
             self.gen = None
@@ -131,6 +131,7 @@ class FlashTile(Tile):
         link = app.link
 
         def go():
+            link.swd.release_core1()
             link.swd.reset()
             time.sleep_ms(300)
             link.connect()
@@ -153,7 +154,7 @@ class FlashTile(Tile):
             if self.cur == 0:
                 app.open_picker("flash")
             elif not app.selected:
-                app.note("Choose a file first")
+                app.note("No file selected")
             elif app.attempt(lambda: uf2.check(app.selected)):  # reject a damaged file before touching the target
                 self._start(app)
 
@@ -169,17 +170,17 @@ class FlashTile(Tile):
             ui.ring(ctx, self._progress(), ui.OK if self.stage >= len(STAGES) else self.colour)
         ui.icon(ctx, "flash", 0, -62, 16, self.colour)
         name = app.selected.rsplit("/", 1)[-1] if app.selected else "no file chosen"
-        ui.text(ctx, ui.clip(name, 22), 0, -30, ui.TEXT if app.selected else ui.MUTED)
+        ui.text(ctx, name, 0, -30, ui.TEXT if app.selected else ui.MUTED, tail=7)
         if running:
             ui.text(ctx, "%s  %d%%" % (STAGES[self.stage], int(self.frac * 100)), 0, 0, self.colour, ui.label_font_size)
             ui.bar(ctx, -70, 18, 140, 8, self.frac, self.colour)
-            ui.text(ctx, "dry run, no hardware" if self.simulated else "CANCEL aborts", 0, 44, ui.MUTED)
+            ui.text(ctx, "test run, nothing written" if self.simulated else "Cancel to stop", 0, 44, ui.MUTED)
         elif self.stage >= len(STAGES):
             ui.text(ctx, "Done", 0, 0, ui.OK, ui.label_font_size)
-            ui.text(ctx, "dry run, nothing written" if self.simulated else "verified, chip restarted", 0, 28, ui.MUTED)
+            ui.text(ctx, "test run, nothing written" if self.simulated else "Verified, target restarted", 0, 28, ui.MUTED)
         else:
             linked = bool(app.link.target and app.link.target.name == "RP2350")
-            for i, label in enumerate(("Choose file", "Start" if linked else "Start (dry run)")):
+            for i, label in enumerate(("Choose file", "Start" if linked else "Test run")):
                 y = 0 + i * 26
                 if i == self.cur:
                     ctx.rgb(*ui.DIM).rectangle(-70, y - 11, 140, 22).fill()
@@ -224,7 +225,7 @@ class MemoryTile(Tile):
             self.addr = int(s.strip().lower().replace("0x", ""), 16) & 0xFFFFFFF8
             self._load(self._app)
         except ValueError:
-            self._app.note("Not a hex number")
+            self._app.note("Enter a hex address")
 
     def enter(self, app):
         self._app = app
@@ -236,8 +237,8 @@ class MemoryTile(Tile):
             a = self.addr + r * 8
             w = self.words
             cells = ("%08X" % w[r * 2], "%08X" % w[r * 2 + 1]) if w else ("--------", "--------")
-            ui.text(ctx, "%08X  %s  %s" % ((a & 0xFFFFFFFF,) + cells), 0, -38 + r * 20, ui.TEXT if r == 0 else ui.MUTED)
-        ui.text(ctx, "OK: set address", 0, 70, ui.MUTED)
+            ui.text(ctx, "%08X  %s  %s" % ((a & 0xFFFFFFFF,) + cells), 0, -38 + r * 20, ui.TEXT if r == 0 else ui.MUTED, ui.tiny_font_size * 0.85)
+        ui.text(ctx, "OK to enter address", 0, 70, ui.MUTED)
 
 
 class CoreTile(ListTile):
@@ -340,7 +341,7 @@ class SettingsTile(ListTile):
     def rows(self, app):
         return ["< SWD %s >" % SPEEDS[self._speed(app)][1],
                 "< Slot %d >" % app.link.port,
-                "OK again: rescue?" if self.armed else "Rescue DP",
+                "OK to confirm rescue" if self.armed else "Rescue DP",
                 "Pin check", "Slot power"]
 
     def adjust(self, app, i, d):
