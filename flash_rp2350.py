@@ -1,0 +1,152 @@
+"""Program the RP2350's flash over SWD by calling its bootrom flash functions.
+
+The core is halted and each bootrom function is run on it (SWD.call), the way the Pico SDK
+does it from a running program: connect_internal_flash, flash_exit_xip, then
+flash_range_erase / flash_range_program from a RAM buffer, then flush_cache and
+enter_cmd_xip so the flash can be read back at 0x10000000.
+
+Flasher.run(path) is a generator that yields (stage, fraction) after each unit of work
+(a sector window), so the UI can draw progress and stay responsive. Stages: 0 erase,
+1 program, 2 verify, 3 done. Raises FlashError on a problem. Closing the generator early
+puts the flash back in XIP mode.
+"""
+import struct
+import time
+
+from . import uf2
+
+XIP = 0x10000000
+SECTOR = 4096
+BLOCK64 = 65536
+BUF = 0x20020000     # staging buffer in SRAM, one sector
+CODE = 0x20010400    # helper code; the stack grows down from here (as in OpenOCD)
+STACK_TOP = 0x20010400
+ACCESSCTRL_CFGRESET = 0x40060008
+# Thumb code captured from OpenOCD: enable CP7 (RCP) in CPACR, and if the RCP is not yet
+# initialised give it a salt (any value will do for a debugger), then SEV and BKPT.
+RCP_INIT = (0xF45F4806, 0x60014140, 0xF710EE30, 0xEC40D404, 0xEC400780, 0xBF400781, 0x0000BE00, 0xE000ED88)
+RT_ARM_SEC = 0x0004  # bootrom table flag: Arm secure function
+ERASE_BLOCK_CMD = 0xD8
+ERASE_TIMEOUT_MS = 10000
+
+
+class FlashError(Exception):
+    pass
+
+
+def _code(a, b):
+    return ord(a) | (ord(b) << 8)
+
+
+def windows(path):
+    """Yield (base, bytearray(SECTOR)) for each 4 KB window the image touches, in address
+    order, padded with 0xFF. The image must be in ascending order (UF2 from the SDK is)."""
+    base = None
+    buf = None
+    for addr, data in uf2.blocks(path):
+        while data:
+            wbase = addr & ~(SECTOR - 1)
+            if wbase != base:
+                if base is not None:
+                    if wbase < base:
+                        raise FlashError("image blocks are not in ascending order")
+                    yield base, buf
+                base, buf = wbase, bytearray(b"\xff" * SECTOR)
+            n = min(len(data), SECTOR - (addr - base))
+            buf[addr - base:addr - base + n] = data[:n]
+            addr += n
+            data = data[n:]
+    if base is not None:
+        yield base, buf
+
+
+class Flasher:
+    def __init__(self, swd, flash_size=4 << 20):
+        self.swd = swd
+        self.flash_size = flash_size
+        self.fn = {}
+
+    # --- bootrom ---
+    def _lookup(self):
+        swd = self.swd
+        table_lookup = (swd.read32(0x14) >> 16) & 0xFFFF   # 16-bit pointer at 0x16
+        if not 0x20 <= table_lookup < 0x8000:
+            raise FlashError("no bootrom function table")
+        for name, code in (("connect", _code("I", "F")), ("exit_xip", _code("E", "X")),
+                           ("erase", _code("R", "E")), ("program", _code("R", "P")),
+                           ("flush", _code("F", "C")), ("enter_xip", _code("C", "X")),
+                           ("state_reset", _code("S", "R"))):
+            addr = swd.call(table_lookup, (code, RT_ARM_SEC), sp=STACK_TOP)
+            if not addr:
+                raise FlashError("bootrom has no %s function" % name)
+            self.fn[name] = addr
+
+    def prepare(self):
+        """Reset the chip with the core caught at its first instruction (Secure state, no
+        stale faults or stack limits), then do what OpenOCD's rp2350 driver does before it
+        calls any bootrom function: reset ACCESSCTRL, initialise the RCP (the bootrom's
+        redundancy coprocessor, which the boot code would normally set up), and clear the
+        bootrom's per-core state. Sequence taken from a logic-analyser capture of OpenOCD."""
+        swd = self.swd
+        swd.reset_halt()
+        swd.write32(ACCESSCTRL_CFGRESET, 0xACCE0001)
+        swd.write_block(CODE, RCP_INIT)
+        swd.write_reg(0x14, 1)                      # PRIMASK = 1
+        swd.call(CODE, sp=STACK_TOP)
+        self._lookup()
+        swd.call(self.fn["state_reset"], (1,), sp=STACK_TOP)   # bootrom_state_reset(current core)
+        swd.call(self.fn["connect"], sp=STACK_TOP)
+        swd.call(self.fn["exit_xip"], sp=STACK_TOP)
+
+    def finish(self):
+        """Flush the cache and put the flash back in XIP mode (readable at 0x10000000)."""
+        self.swd.call(self.fn["flush"], sp=STACK_TOP)
+        self.swd.call(self.fn["enter_xip"], sp=STACK_TOP)
+
+    # --- the three stages ---
+    def erase(self, start, end):
+        off = (start - XIP) & ~(SECTOR - 1)
+        stop = (end - XIP + SECTOR - 1) & ~(SECTOR - 1)
+        first = off
+        while off < stop:
+            seg = min(stop, (off | (BLOCK64 - 1)) + 1)
+            # these bootrom functions return nothing (R0 is left as the first argument);
+            # a failure shows up as a timeout here or in verify()
+            self.swd.call(self.fn["erase"], (off, seg - off, BLOCK64, ERASE_BLOCK_CMD), sp=STACK_TOP, timeout_ms=ERASE_TIMEOUT_MS)
+            off = seg
+            yield (off - first) / (stop - first)
+
+    def program(self, path, total):
+        done = 0
+        for base, buf in windows(path):
+            self.swd.write_block(BUF, struct.unpack("<%dI" % (SECTOR // 4), buf))
+            self.swd.call(self.fn["program"], (base - XIP, BUF, SECTOR), sp=STACK_TOP, timeout_ms=ERASE_TIMEOUT_MS)
+            done += SECTOR
+            yield min(1.0, done / total)
+
+    def verify(self, path, total):
+        done = 0
+        for base, buf in windows(path):
+            got = self.swd.read_block(base, SECTOR // 4)
+            if struct.pack("<%dI" % (SECTOR // 4), *got) != bytes(buf):
+                raise FlashError("verify failed near %08X" % base)
+            done += SECTOR
+            yield min(1.0, done / total)
+
+    def run(self, path):
+        info = uf2.check(path)
+        if info["start"] is None or info["start"] < XIP or info["end"] > XIP + self.flash_size:
+            raise FlashError("image is outside flash")
+        total = ((info["end"] - (info["start"] & ~(SECTOR - 1))) + SECTOR - 1) // SECTOR * SECTOR
+        yield 0, 0.0
+        self.prepare()
+        try:
+            for f in self.erase(info["start"], info["end"]):
+                yield 0, f
+            for f in self.program(path, total):
+                yield 1, f
+        finally:
+            self.finish()
+        for f in self.verify(path, total):
+            yield 2, f
+        yield 3, 1.0

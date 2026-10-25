@@ -1,0 +1,7 @@
+{
+    "name": "SWD Programmer",
+    "category": "Apps",
+    "author": "Corteil",
+    "description": "SWD programmer and debugger for an RP2350 hexpansion: connect, flash .uf2/.bin, memory, core control, UART bridge, rescue.",
+    "version": "1"
+}
