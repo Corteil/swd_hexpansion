@@ -28,7 +28,11 @@ class SWDError(Exception):
 
 
 class SWD:
-    def __init__(self, clk=SWCLK_PIN, dio=SWDIO_PIN):
+    def __init__(self, clk=SWCLK_PIN, dio=SWDIO_PIN, delay_us=0):
+        # delay_us: extra half-period delay per clock edge; raise it if the
+        # ESP32-S3 bit-bang is too fast for the target or the wiring
+        self.delay_us = delay_us
+        self.select = None   # cached DP SELECT value
         # Start tri-stated so the unpowered RP2350 isn't back-fed
         self.clk = Pin(clk, Pin.IN)
         self.dio = Pin(dio, Pin.IN)
@@ -49,8 +53,13 @@ class SWD:
 
     # ---- bit level ----
     def _pulse(self):
+        d = self.delay_us
         self.clk(1)
+        if d:
+            time.sleep_us(d)
         self.clk(0)
+        if d:
+            time.sleep_us(d)
 
     def _write_bits(self, value, n):
         # set the latch to the first bit BEFORE switching to output (no glitch)
@@ -114,6 +123,8 @@ class SWD:
         self._turnaround()
         self._write_bits(targetsel, 32)
         self._write_bits(self._parity(targetsel), 1)
+        self._write_bits(0, 8)        # idle cycles before the next request
+        self.select = None            # SELECT resets on target change
 
     # ---- transfers ----
     def _xfer(self, apndp, rnw, addr, data=0, retries=8):
@@ -164,6 +175,8 @@ class SWD:
 
     def dp_write(self, addr, val):
         self._xfer(0, 0, addr, val)
+        if addr == DP_SELECT:
+            self.select = val
 
     def ap_read(self, addr):
         self._xfer(1, 1, addr)               # posted; real data comes next
@@ -205,7 +218,12 @@ class SWD:
     # UNVERIFIED: MEM-AP register offsets below (CSW/TAR/DRW at +0xD00/+0xD04/+0xD0C)
     # are the ADIv6 standard layout; confirm with OpenOCD -d3 against real hardware.
     def _ap_sel(self, offset):
-        self.dp_write(DP_SELECT, (self.ap_base + offset) & 0xFFFFFFF0)
+        # SELECT[31:4] = AP address, SELECT[3:0] = DPBANKSEL (kept 0 so the
+        # CTRLSTAT/DPIDR accesses elsewhere stay on bank 0)
+        sel = (self.ap_base + offset) & 0xFFFFFFF0
+        if sel != self.select:
+            self.dp_write(DP_SELECT, sel)
+            self.select = sel
         return offset & 0xC
 
     def _mem_reg_write(self, offset, val):
