@@ -140,6 +140,26 @@ class Flasher:
             done += SECTOR
             yield min(1.0, done / total)
 
+    def erase_all(self):
+        """Generator like run(): erase the whole flash so the chip is as it left the factory
+        (all 0xFF, which makes the bootrom fall back to USB boot mode), then spot-check the
+        first and last 256 bytes of every 64 KB block. Stages: 0 erase, 2 check, 3 done."""
+        yield 0, 0.0
+        self.prepare()
+        try:
+            for f in self.erase(XIP, XIP + self.flash_size):
+                yield 0, f
+        finally:
+            self.finish()
+        blocks = self.flash_size // BLOCK64
+        for i in range(blocks):
+            base = XIP + i * BLOCK64
+            for addr in (base, base + BLOCK64 - 256):
+                if any(w != 0xFFFFFFFF for w in self.swd.read_block(addr, 64)):
+                    _fail("Erase failed at %08X" % addr)
+            yield 2, (i + 1) / blocks
+        yield 3, 1.0
+
     def run(self, path):
         info = uf2.check(path)
         if info["start"] is None or info["start"] < XIP or info["end"] > XIP + self.flash_size:

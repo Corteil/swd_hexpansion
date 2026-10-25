@@ -47,3 +47,10 @@ Speed: about 7 KB/s end to end (program about 17 KB/s, verify about 20 KB/s).
 
 `flash_range_erase` and `flash_range_program` return nothing, so there is no status to check; a
 failure shows as a timeout or a verify mismatch.
+
+**Erase all** (third row of the Flash tile, needs a second OK to confirm) erases the whole flash so the
+chip is as new: all `0xFF`, which makes the bootrom fall back to USB boot mode. It then spot-checks the
+first and last 256 bytes of every 64 KB block and restarts the target. The flash size comes from the
+target profile (4 MB for the RP2350 entry), so a board with more flash is only erased up to that size.
+Checked on a Pico 2: a full dump of the 4 MB with OpenOCD afterwards was all `FF`, and the chip appeared
+as `2e8a:000f RP2350 Boot` on USB.

@@ -81,23 +81,37 @@ class FlashTile(Tile):
         self.frac = 0.0
         self.gen = None       # Flasher.run() generator while a real flash is running
         self.simulated = False
+        self.erasing = False  # the running job is "Erase all", not a flash
+        self.armed = False    # Erase all waits for a second OK
 
     def summary(self, app):
         return ui.clip(app.selected.rsplit("/", 1)[-1], 24) if app.selected else "no file chosen"
 
     def enter(self, app):
         self.cur = 0
+        self.armed = False
 
     def _progress(self):
         if self.stage < 0:
             return 0.0
         if self.stage >= len(STAGES):
             return 1.0
+        if self.erasing:   # erase is most of the work, the spot-check the last tenth
+            return self.frac * 0.9 if self.stage == 0 else 0.9 + self.frac * 0.1
         return (self.stage + self.frac) / len(STAGES)
+
+    def _start_erase(self, app):
+        link = app.link
+        if not (link.swd and link.target and link.target.name == "RP2350"):
+            app.note("Not connected")
+            return
+        from .flash_rp2350 import Flasher
+        self.stage, self.frac, self.simulated, self.erasing = 0, 0.0, False, True
+        self.gen = Flasher(link.swd, link.target.flash_size).erase_all()
 
     def _start(self, app):
         link = app.link
-        self.stage, self.frac, self.gen = 0, 0.0, None
+        self.stage, self.frac, self.gen, self.erasing = 0, 0.0, None, False
         self.simulated = not (link.swd and link.target and link.target.name == "RP2350")
         if not self.simulated:
             from .flash_rp2350 import Flasher
@@ -148,10 +162,18 @@ class FlashTile(Tile):
                     self.frac = 0.0
                     self.stage += 1
             return
-        if b.pressed(BUTTON_TYPES["DOWN"]) or b.pressed(BUTTON_TYPES["UP"]):
-            self.cur = 1 - self.cur
+        if b.pressed(BUTTON_TYPES["DOWN"]):
+            self.cur, self.armed = (self.cur + 1) % 3, False
+        elif b.pressed(BUTTON_TYPES["UP"]):
+            self.cur, self.armed = (self.cur - 1) % 3, False
         elif b.pressed(BUTTON_TYPES["CONFIRM"]):
-            if self.cur == 0:
+            if self.cur == 2:
+                if self.armed:
+                    self.armed = False
+                    self._start_erase(app)
+                else:
+                    self.armed = True
+            elif self.cur == 0:
                 app.open_picker("flash")
             elif not app.selected:
                 app.note("No file selected")
@@ -169,19 +191,25 @@ class FlashTile(Tile):
         if self.stage >= 0:
             ui.ring(ctx, self._progress(), ui.OK if self.stage >= len(STAGES) else self.colour)
         ui.icon(ctx, "flash", 0, -62, 16, self.colour)
-        name = app.selected.rsplit("/", 1)[-1] if app.selected else "no file chosen"
-        ui.text(ctx, name, 0, -30, ui.TEXT if app.selected else ui.MUTED, tail=7)
+        if self.erasing and self.stage >= 0:   # erasing has nothing to do with the chosen file
+            ui.text(ctx, "Erase all", 0, -30, ui.TEXT)
+        else:
+            name = app.selected.rsplit("/", 1)[-1] if app.selected else "no file chosen"
+            ui.text(ctx, name, 0, -30, ui.TEXT if app.selected else ui.MUTED, tail=7)
         if running:
-            ui.text(ctx, "%s  %d%%" % (STAGES[self.stage], int(self.frac * 100)), 0, 0, self.colour, ui.label_font_size)
+            stage = "Check" if self.erasing and self.stage == 2 else STAGES[self.stage]
+            ui.text(ctx, "%s  %d%%" % (stage, int(self.frac * 100)), 0, 0, self.colour, ui.label_font_size)
             ui.bar(ctx, -70, 18, 140, 8, self.frac, self.colour)
             ui.text(ctx, "test run, nothing written" if self.simulated else "Cancel to stop", 0, 44, ui.MUTED)
         elif self.stage >= len(STAGES):
             ui.text(ctx, "Done", 0, 0, ui.OK, ui.label_font_size)
-            ui.text(ctx, "test run, nothing written" if self.simulated else "Verified, target restarted", 0, 28, ui.MUTED)
+            ui.text(ctx, "test run, nothing written" if self.simulated else
+                    ("Erased, target restarted" if self.erasing else "Verified, target restarted"), 0, 28, ui.MUTED)
         else:
             linked = bool(app.link.target and app.link.target.name == "RP2350")
-            for i, label in enumerate(("Choose file", "Start" if linked else "Test run")):
-                y = 0 + i * 26
+            erase = "OK to confirm erase" if self.armed else "Erase all"
+            for i, label in enumerate(("Choose file", "Start" if linked else "Test run", erase)):
+                y = -6 + i * 24
                 if i == self.cur:
                     ctx.rgb(*ui.DIM).rectangle(-70, y - 11, 140, 22).fill()
                 ui.text(ctx, label, 0, y, ui.TEXT if i == self.cur else ui.MUTED)
