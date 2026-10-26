@@ -477,22 +477,27 @@ class SettingsTile(ListTile):
             link.port = (link.port - 1 + d) % 6 + 1
 
     def _rescue(self, app):
-        """Rescue reset: both cores end up in the bootrom. Works on whatever the debug port still
-        answers, so a locked-up or hung chip is fine; the link is rebuilt afterwards."""
+        """Rescue reset. RP2350: both cores end up in the bootrom. RP2040: a reset through the
+        rescue DP, which also frees a chip whose core DPs have stopped answering. Works on
+        whatever the debug port still answers, so a locked-up or hung chip is fine; the link is
+        rebuilt afterwards."""
         link = app.link
-        if link.swd is None or link.target is None:
-            if not app.attempt(link.connect):   # nothing to recover from yet: try to attach first
-                return
-        if link.target.name != "RP2350":
-            app.note("Rescue is RP2350 only")
+        known = link.swd is not None and link.target is not None
+        name = link.target.name if known else None
+        if known and name not in ("RP2350", "RP2040"):
+            app.note("Rescue is RP2040/RP2350 only")
             return
 
         def go():
-            link.swd.rescue()
-            time.sleep_ms(200)
+            if name == "RP2350":
+                link.swd.rescue()
+                time.sleep_ms(200)
+            else:   # an RP2040, or a chip that does not answer: try its rescue DP
+                link.open()
+                link.swd.rescue_rp2040()
             link.connect()
         if app.attempt(go):
-            app.note("Rescued, cores in bootrom")
+            app.note("Rescued: " + link.target.name)
 
     def act(self, app, i):
         if i == 2:

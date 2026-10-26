@@ -15,7 +15,9 @@ import time
 TARGET_CORE0 = 0x00040927
 TARGET_CORE1 = 0x10040927
 TARGET_RESCUE = 0xF0040927
+TARGET_RP2040_RESCUE = 0xF1002927
 
+RP2040_RESCUE_DPIDR = 0x10212927
 ACK_OK, ACK_WAIT, ACK_FAULT = 1, 2, 4
 
 # DP registers (bank 0 unless noted)
@@ -333,6 +335,10 @@ class SWD:
             dpidr = self._try_select(targetsel, False)
         except SWDError:
             dpidr = self._try_select(targetsel, True)
+        if dpidr == RP2040_RESCUE_DPIDR:
+            # The RP2040 rescue DP answers when no core was selected. A power-up request on it
+            # resets the chip, so don't send one: the caller must pick a core with TARGETSEL.
+            _fail("Rescue DP answered, not a core", "DPIDR %08X" % dpidr)
         self.dp_write(DP_ABORT, 0x1E)        # clear sticky errors
         self.dp_write(DP_SELECT, 0)
         self.dp_write(DP_CTRLSTAT, 0x50000000)   # CDBGPWRUPREQ | CSYSPWRUPREQ
@@ -506,6 +512,22 @@ class SWD:
         self.ap_write(0, 0x80000000)
         self.ap_write(0, 0)
         self.select = None
+
+    def rescue_rp2040(self):
+        """RP2040 rescue: select the rescue DP and pulse a debug power-up request on it. That resets
+        the whole chip except the DPs, and (unlike a plain line reset, which leaves the rescue DP
+        selected and the core DPs silent) leaves core 0 selectable again through the dormant wake-up.
+        The bootrom then sees the rescue flag. Reconnect afterwards."""
+        self.enable()
+        try:
+            self._try_select(TARGET_RP2040_RESCUE, False)
+        except SWDError:
+            self._try_select(TARGET_RP2040_RESCUE, True)
+        self.dp_write(DP_ABORT, 0x1E)
+        self.dp_write(DP_CTRLSTAT, 0x50000000)
+        time.sleep_ms(50)
+        self.dp_write(DP_CTRLSTAT, 0)
+        time.sleep_ms(300)
 
     def read_reg(self, n):
         """Core register n (0-12, 13=SP, 14=LR, 15=PC) of a halted core."""
