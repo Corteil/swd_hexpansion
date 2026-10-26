@@ -1,5 +1,5 @@
 """The tiles other than Files. Connect, Memory and Core drive the SWD link; Flash is a
-dry run, and rescue, pin check and slot power are still stubs."""
+dry run, and pin check and slot power are still stubs."""
 import time
 
 from events.input import BUTTON_TYPES
@@ -476,11 +476,29 @@ class SettingsTile(ListTile):
             link.close()  # the pins belong to the old slot
             link.port = (link.port - 1 + d) % 6 + 1
 
+    def _rescue(self, app):
+        """Rescue reset: both cores end up in the bootrom. Works on whatever the debug port still
+        answers, so a locked-up or hung chip is fine; the link is rebuilt afterwards."""
+        link = app.link
+        if link.swd is None or link.target is None:
+            if not app.attempt(link.connect):   # nothing to recover from yet: try to attach first
+                return
+        if link.target.name != "RP2350":
+            app.note("Rescue is RP2350 only")
+            return
+
+        def go():
+            link.swd.rescue()
+            time.sleep_ms(200)
+            link.connect()
+        if app.attempt(go):
+            app.note("Rescued, cores in bootrom")
+
     def act(self, app, i):
         if i == 2:
             if self.armed:
                 self.armed = False
-                _need_link(app)
+                self._rescue(app)
             else:
                 self.armed = True
             return

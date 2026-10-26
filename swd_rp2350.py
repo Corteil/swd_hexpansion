@@ -496,6 +496,17 @@ class SWD:
             _fail("Could not halt the CPU", "no halt out of reset")
         self.write32(DEMCR, DEMCR_TRCENA)
 
+    def rescue(self):
+        """RP2350 rescue reset: pulse RESCUE_RESTART in the RP_AP CTRL register (ADIv6 AP at
+        0x80000, same as OpenOCD's rescue_reset). Resets everything except the DP and RP_AP and
+        leaves both cores in the bootrom, so it recovers a chip whose firmware has locked the
+        cores or switched off the debug access. Needs a live DP (connect() first); reconnect
+        afterwards."""
+        self.dp_write(DP_SELECT, 0x80000)
+        self.ap_write(0, 0x80000000)
+        self.ap_write(0, 0)
+        self.select = None
+
     def read_reg(self, n):
         """Core register n (0-12, 13=SP, 14=LR, 15=PC) of a halted core."""
         self.write32(DCRSR, n)
