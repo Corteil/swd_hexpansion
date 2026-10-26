@@ -162,12 +162,12 @@ class Flasher:
 
     def run(self, path):
         info = uf2.check(path)
-        if info["start"] is None or info["start"] < XIP or info["end"] > XIP + self.flash_size:
-            _fail("File does not fit in flash", "image %s to %s" % (info["start"], info["end"]))
-        total = ((info["end"] - (info["start"] & ~(SECTOR - 1))) + SECTOR - 1) // SECTOR * SECTOR
+        total = ((info["end"] or 0) - ((info["start"] or 0) & ~(SECTOR - 1)) + SECTOR - 1) // SECTOR * SECTOR
         yield 0, 0.0
-        self.prepare()
+        self.prepare()   # may find the real flash size, so the size check comes after it
         try:
+            if info["start"] is None or info["start"] < XIP or info["end"] > XIP + self.flash_size:
+                _fail("File does not fit in flash", "image %s to %s, flash %d" % (info["start"], info["end"], self.flash_size))
             for f in self.erase(info["start"], info["end"]):
                 yield 0, f
             for f in self.program(path, total):

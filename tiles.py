@@ -53,7 +53,7 @@ class ConnectTile(ListTile):
         from .targets import TARGETS
         link = app.link
         name = "auto" if link.choice < 0 else TARGETS[link.choice].name
-        return ["Connect", "< Target: %s >" % name, "Read debug ID", "Disconnect"]
+        return ["Connect", "< Target: %s >" % name, "Read debug ID", "Flash ID", "Disconnect"]
 
     def adjust(self, app, i, d):
         from .targets import TARGETS
@@ -70,7 +70,27 @@ class ConnectTile(ListTile):
             if swd:
                 app.attempt(lambda: app.note("Debug ID %08X" % swd.dp_read(0)))
         elif i == 3:
+            self._flash_id(app)
+        elif i == 4:
             link.close()
+
+    def _flash_id(self, app):
+        """Ask the flash chip what it is. Needs a halted, reset chip, so it restarts afterwards."""
+        link = app.link
+        if _linked(app) is None:
+            return
+        if link.target.name != "RP2040":
+            app.note("Flash ID is RP2040 only")
+            return
+        flasher = _flasher(link)
+
+        def go():
+            jedec, _size, text = flasher.probe()
+            link.swd.reset()
+            time.sleep_ms(300)
+            link.connect()
+            app.note("%s (%02X%02X%02X)" % ((text,) + jedec))
+        app.attempt(go)
 
     def draw(self, app, ctx):
         super().draw(app, ctx)
