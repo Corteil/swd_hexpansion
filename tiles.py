@@ -469,15 +469,53 @@ class SettingsTile(ListTile):
     key = "settings"
     title = "Settings"
     colour = (0.8, 0.8, 0.85)
-    hint = "speed, port, rescue"
+    hint = "speed, port, rescue, pins"
 
     def __init__(self):
         super().__init__()
         self.armed = False
+        self.check = None   # the Pin check generator while its results are on screen
+        self.lines = []     # result lines of the Pin check: (text, ok)
 
     def enter(self, app):
         super().enter(app)
         self.armed = False
+        self._stop_check()
+
+    def _stop_check(self):
+        if self.check is not None:
+            try:
+                self.check.close()   # puts the LEDs back off
+            except Exception:
+                pass
+        self.check = None
+        self.lines = []
+
+    def _start_check(self, app):
+        """Release the pins first: the check drives them itself, so any connection is closed."""
+        from . import pincheck
+        app.link.close()
+        self.lines = [("starting...", None)]
+        self.check = pincheck.run(app.link.port)
+
+    def update(self, app, b, delta):
+        if self.check is None and not self.lines:
+            super().update(app, b, delta)
+            return
+        if self.check is not None:   # one step per frame; each step can take a second or two
+            try:
+                self.lines = next(self.check)
+            except StopIteration:
+                self.check = None
+            except Exception as e:
+                self.check = None
+                self.lines.append((str(e)[:30] or type(e).__name__, False))
+
+    def back(self, app):
+        if self.check is not None or self.lines:
+            self._stop_check()
+            return True
+        return False
 
     def _speed(self, app):
         for i, (us, _name) in enumerate(SPEEDS):
@@ -533,8 +571,21 @@ class SettingsTile(ListTile):
                 self.armed = True
             return
         self.armed = False
-        if i > 2:
+        if i == 3:
+            self._start_check(app)
+        elif i > 3:
             _need_link(app)
+
+    def draw(self, app, ctx):
+        if self.check is None and not self.lines:
+            super().draw(app, ctx)
+            return
+        ui.icon(ctx, self.key, 0, -70, 16, self.colour)
+        for k, (text, ok) in enumerate(self.lines):
+            colour = ui.OK if ok else ui.WARN if ok is False else ui.MUTED
+            ui.text(ctx, text, 0, -38 + k * 20, colour)
+        if self.check is None:
+            ui.text(ctx, "Cancel to close", 0, 78, ui.MUTED)
 
 
 TILES = [ConnectTile(), FlashTile(), FilesTile(), MemoryTile(), CoreTile(), SerialTile(), SettingsTile()]
