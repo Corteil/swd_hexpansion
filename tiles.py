@@ -469,17 +469,17 @@ class SettingsTile(ListTile):
     key = "settings"
     title = "Settings"
     colour = (0.8, 0.8, 0.85)
-    hint = "speed, port, rescue, pins"
+    hint = "speed, port, rescue, power"
 
     def __init__(self):
         super().__init__()
-        self.armed = False
+        self.armed = None   # index of the row waiting for a second OK (rescue, slot power)
         self.check = None   # the Pin check generator while its results are on screen
         self.lines = []     # result lines of the Pin check: (text, ok)
 
     def enter(self, app):
         super().enter(app)
-        self.armed = False
+        self.armed = None
         self._stop_check()
 
     def _stop_check(self):
@@ -526,8 +526,8 @@ class SettingsTile(ListTile):
     def rows(self, app):
         return ["< SWD %s >" % SPEEDS[self._speed(app)][1],
                 "< Slot %d >" % app.link.port,
-                "OK to confirm rescue" if self.armed else "Rescue DP",
-                "Pin check", "Slot power"]
+                "OK to confirm rescue" if self.armed == 2 else "Rescue DP",
+                "Pin check", "OK to cycle power" if self.armed == 4 else "Slot power"]
 
     def adjust(self, app, i, d):
         link = app.link
@@ -562,19 +562,53 @@ class SettingsTile(ListTile):
         if app.attempt(go):
             app.note("Rescued: " + link.target.name)
 
-    def act(self, app, i):
-        if i == 2:
-            if self.armed:
-                self.armed = False
-                self._rescue(app)
-            else:
-                self.armed = True
+    def _slot_power(self, app):
+        """Cut the slot's power for half a second and restore it. The slot's detect pin doubles as
+        its power switch: the firmware's own Power Off screen drives it high to switch hexpansions
+        off, and the hexpansion manager sees the rise as a removal and the release as a fresh
+        insertion. Slots the manager has storage or an app on are refused: cutting an SD card's
+        power mid-write, or an app's, is not something to do from here."""
+        import tildagonos
+        from egpio import ePin
+        link = app.link
+        port = link.port
+        try:
+            from system.hexpansion.app import _hexpansion_manager as manager
+        except ImportError:
+            manager = None
+        if manager is not None and (port in manager.mountpoints or port in manager.hexpansion_apps):
+            app.note("Slot %d has an app or storage" % port)
             return
-        self.armed = False
+        detect = (tildagonos.EPIN_ND_A, tildagonos.EPIN_ND_B, tildagonos.EPIN_ND_C,
+                  tildagonos.EPIN_ND_D, tildagonos.EPIN_ND_E, tildagonos.EPIN_ND_F)[port - 1]
+        was_linked = link.target is not None
+        link.close()   # its pins lose power too
+        pin = ePin(detect, ePin.OUT)
+        try:
+            pin.on()
+            time.sleep_ms(500)
+        finally:
+            pin.init(ePin.IN)   # back to a detect input; the target is powered again
+        time.sleep_ms(300)
+        if was_linked and app.attempt(link.connect):
+            app.note("Slot %d power cycled, reconnected" % port)
+        else:
+            app.note("Slot %d power cycled" % port)
+
+    def act(self, app, i):
+        if i in (2, 4):
+            if self.armed == i:
+                self.armed = None
+                if i == 2:
+                    self._rescue(app)
+                else:
+                    self._slot_power(app)
+            else:
+                self.armed = i
+            return
+        self.armed = None
         if i == 3:
             self._start_check(app)
-        elif i > 3:
-            _need_link(app)
 
     def draw(self, app, ctx):
         if self.check is None and not self.lines:
