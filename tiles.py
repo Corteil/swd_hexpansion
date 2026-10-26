@@ -1,11 +1,12 @@
 """The tiles other than Files. Connect, Memory and Core drive the SWD link; Flash is a
-dry run, and Serial, rescue, pin check and slot power are still stubs."""
+dry run, and rescue, pin check and slot power are still stubs."""
 import time
 
 from events.input import BUTTON_TYPES
 
 from . import ui, uf2
 from .filepicker import FilesTile
+from .leds import RX, TX
 from .tile import ListTile, Tile
 
 STAGES = ("Erase", "Program", "Verify")
@@ -326,24 +327,117 @@ class SerialTile(ListTile):
     title = "Serial"
     colour = (0.3, 0.9, 0.9)
     hint = "UART terminal"
+    LINES = 7       # lines on screen
+    WIDTH = 26      # characters per line
+    KEEP = 60       # lines of scrollback
 
     def __init__(self):
         super().__init__()
-        self.baud = 5
+        self.baud = 4
+        self.swap = False   # False: badge TX = HS_H, RX = HS_I
+        self.uart = None
+        self.term = False   # showing the terminal rather than the list
+        self.lines = [""]
+        self.scroll = 0     # lines above the newest
+        self.rx_bytes = 0
 
     def summary(self, app):
         return "%d baud" % BAUDS[self.baud]
 
     def rows(self, app):
-        return ["Terminal", "< %d baud >" % BAUDS[self.baud], "Bridge to USB"]
+        return ["Terminal", "< %d baud >" % BAUDS[self.baud],
+                "< TX HS_%s RX HS_%s >" % (("I", "H") if self.swap else ("H", "I"))]
 
     def adjust(self, app, i, d):
         if i == 1:
             self.baud = (self.baud + d) % len(BAUDS)
+        elif i == 2:
+            self.swap = not self.swap
 
     def act(self, app, i):
-        if i != 1:
-            _need_link(app)
+        if i == 0:
+            app.attempt(lambda: self._open(app))
+
+    def _open(self, app):
+        from machine import UART
+        from system.hexpansion.config import HexpansionConfig
+        app.link.open()   # claims the LEDs
+        pins = HexpansionConfig(app.link.port).pin
+        tx, rx = (pins[3], pins[2]) if self.swap else (pins[2], pins[3])
+        self._close()
+        self.uart = UART(1, BAUDS[self.baud], tx=tx, rx=rx, rxbuf=1024, timeout=0)
+        self.term, self.scroll = True, 0
+
+    def _close(self):
+        if self.uart is not None:
+            self.uart.deinit()
+            self.uart = None
+
+    def back(self, app):
+        if self.term:
+            self.term = False
+            self._close()
+            return True
+        return False
+
+    def _feed(self, data):
+        """Append received bytes to the scrollback, wrapping and honouring CR / LF / backspace."""
+        for c in data:
+            if c == 10:
+                self.lines.append("")
+            elif c == 8 or c == 127:
+                self.lines[-1] = self.lines[-1][:-1]
+            elif c == 13:
+                continue
+            elif 32 <= c < 127 or c == 9:
+                if len(self.lines[-1]) >= self.WIDTH:
+                    self.lines.append("")
+                self.lines[-1] += chr(c) if c != 9 else " "
+            else:
+                self.lines[-1] += "."   # non-text byte: a hint something arrived, e.g. wrong baud
+                if len(self.lines[-1]) > self.WIDTH:
+                    self.lines.append("")
+        del self.lines[:-self.KEEP]
+        if self.scroll:
+            self.scroll = min(self.scroll + data.count(b"\n"), len(self.lines) - 1)
+
+    def update(self, app, b, delta):
+        if not self.term:
+            super().update(app, b, delta)
+            return
+        try:
+            data = self.uart.read()
+        except Exception as e:
+            app.note(str(e)[:40])
+            data = None
+        if data:
+            self.rx_bytes += len(data)
+            self._feed(data)
+            app.link.leds.pulse(RX)
+        if b.pressed(BUTTON_TYPES["CONFIRM"]):
+            app.ask_text("Send (+ newline)", "", lambda t: self._send(app, t))
+        elif b.pressed(BUTTON_TYPES["UP"]):
+            self.scroll = min(self.scroll + 1, max(0, len(self.lines) - self.LINES))
+        elif b.pressed(BUTTON_TYPES["DOWN"]):
+            self.scroll = max(0, self.scroll - 1)
+        elif b.pressed(BUTTON_TYPES["LEFT"]):
+            self.lines, self.scroll = [""], 0
+
+    def _send(self, app, text):
+        if self.uart is not None:
+            self.uart.write(text.encode() + b"\r\n")
+            app.link.leds.pulse(TX)
+
+    def draw(self, app, ctx):
+        if not self.term:
+            super().draw(app, ctx)
+            return
+        end = len(self.lines) - self.scroll
+        for r, line in enumerate(self.lines[max(0, end - self.LINES):end]):
+            ui.text(ctx, line or " ", 0, -52 + r * 17, ui.TEXT if r == min(end, self.LINES) - 1 else ui.MUTED,
+                    ui.tiny_font_size * 0.9)
+        ui.text(ctx, "%d baud  rx %d" % (BAUDS[self.baud], self.rx_bytes), 0, 74, self.colour, ui.tiny_font_size * 0.85)
+        ui.text(ctx, "OK send  LEFT clear", 0, 88, ui.MUTED, ui.tiny_font_size * 0.85)
 
 
 class SettingsTile(ListTile):

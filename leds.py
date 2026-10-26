@@ -16,19 +16,23 @@ class Leds:
     def __init__(self, ls_pins):
         self.pins = [ls_pins[0], ls_pins[1], ls_pins[2]]
         self.until = [0, 0, 0]
+        self.pending = [0, 0, 0]  # pulse ms asked for, not yet lit
         self.state = [0, 0, 0]  # 1 = lit
         for p in self.pins:
             p.init(p.OUT)
             p.value(1)  # off
 
-    def pulse(self, led, ms=60):
-        self.until[led] = time.ticks_add(time.ticks_ms(), ms)
-        if not self.until[led]:
-            self.until[led] = 1
+    def pulse(self, led, ms=80):
+        # The on-time starts at the next service(): a frame can take longer than ms,
+        # and a pulse that expired before it was ever written would never show.
+        self.pending[led] = ms
 
     def service(self):
         now = time.ticks_ms()
         for i, p in enumerate(self.pins):
+            if self.pending[i]:
+                self.until[i] = time.ticks_add(now, self.pending[i]) or 1
+                self.pending[i] = 0
             want = 1 if self.until[i] and time.ticks_diff(self.until[i], now) > 0 else 0
             if want != self.state[i]:
                 p.value(0 if want else 1)  # active low
@@ -36,4 +40,5 @@ class Leds:
 
     def off(self):
         self.until = [0, 0, 0]
+        self.pending = [0, 0, 0]
         self.service()
