@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.13)
 
-set(PICO_BOARD pico2)
+if (NOT DEFINED PICO_BOARD)
+    set(PICO_BOARD pico2)
+endif()
 include(pico_sdk_import.cmake)
 
 project(swd_test C CXX ASM)

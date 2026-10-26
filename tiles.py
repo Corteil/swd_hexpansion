@@ -18,6 +18,19 @@ def _need_link(app):
     app.note("Not available yet")
 
 
+def _flasher(link):
+    """A Flasher for the connected chip, or None when there is no flash algorithm for it."""
+    if not (link.swd and link.target):
+        return None
+    if link.target.name == "RP2350":
+        from .flash_rp2350 import Flasher
+    elif link.target.name == "RP2040":
+        from .flash_rp2040 import Flasher
+    else:
+        return None
+    return Flasher(link.swd, link.target.flash_size)
+
+
 def _linked(app):
     """The SWD driver once connected, else a pop-up and None."""
     if app.link.swd is None or app.link.target is None:
@@ -102,21 +115,19 @@ class FlashTile(Tile):
         return (self.stage + self.frac) / len(STAGES)
 
     def _start_erase(self, app):
-        link = app.link
-        if not (link.swd and link.target and link.target.name == "RP2350"):
+        flasher = _flasher(app.link)
+        if flasher is None:
             app.note("Not connected")
             return
-        from .flash_rp2350 import Flasher
         self.stage, self.frac, self.simulated, self.erasing = 0, 0.0, False, True
-        self.gen = Flasher(link.swd, link.target.flash_size).erase_all()
+        self.gen = flasher.erase_all()
 
     def _start(self, app):
-        link = app.link
+        flasher = _flasher(app.link)
         self.stage, self.frac, self.gen, self.erasing = 0, 0.0, None, False
-        self.simulated = not (link.swd and link.target and link.target.name == "RP2350")
-        if not self.simulated:
-            from .flash_rp2350 import Flasher
-            self.gen = Flasher(link.swd, link.target.flash_size).run(app.selected)
+        self.simulated = flasher is None
+        if flasher is not None:
+            self.gen = flasher.run(app.selected)
 
     def _step(self, app):
         """Advance the real flash by one unit of work (about a sector)."""
@@ -207,7 +218,7 @@ class FlashTile(Tile):
             ui.text(ctx, "test run, nothing written" if self.simulated else
                     ("Erased, target restarted" if self.erasing else "Verified, target restarted"), 0, 28, ui.MUTED)
         else:
-            linked = bool(app.link.target and app.link.target.name == "RP2350")
+            linked = bool(app.link.target and app.link.target.name in ("RP2350", "RP2040"))
             erase = "OK to confirm erase" if self.armed else "Erase all"
             for i, label in enumerate(("Choose file", "Start" if linked else "Test run", erase)):
                 y = -6 + i * 24
