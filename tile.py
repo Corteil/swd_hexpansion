@@ -2,6 +2,21 @@
 from . import ui
 
 
+def flasher_for(link):
+    """A Flasher for the connected chip, or None when there is no flash algorithm for it."""
+    if not (link.swd and link.target):
+        return None
+    if link.target.name == "RP2350":
+        from .flash_rp2350 import Flasher
+    elif link.target.name == "RP2040":
+        from .flash_rp2040 import Flasher
+    else:
+        return None
+    flasher = Flasher(link.swd, link.target.flash_size)
+    flasher.on_chip = lambda text: setattr(link, "flash_text", text)   # the Connect tile shows it
+    return flasher
+
+
 class Link:
     """The connection to the target, and what the header shows about it."""
 
@@ -15,6 +30,7 @@ class Link:
         self.swd = None
         self.leds = None
         self.flash_text = None  # "Winbond 16 MB" once ID Flash has read the chip
+        self.xip_ok = False     # flash window known to be readable since the last connect
 
     def label(self):
         """Short enough for the top edge of the round display."""
@@ -39,11 +55,13 @@ class Link:
             self.swd.disable()
             self.leds.off()
         self.swd = self.leds = self.target = self.idcode = self.flash_text = None
+        self.xip_ok = False
         self.state = "no link"
 
     def connect(self):
         from .targets import TARGETS
         self.open()
+        self.xip_ok = False
         self.swd.delay_us = self.delay_us
         candidates = TARGETS if self.choice < 0 else [TARGETS[self.choice]]
         error = None
@@ -62,6 +80,26 @@ class Link:
             return
         self.state, self.idcode, self.target = "no link", None, None
         raise error
+
+    def ensure_xip(self):
+        """Make the flash window at 0x10000000 readable; returns True if that took action. A chip
+        waiting in the bootrom (no firmware, BOOTSEL, after a rescue) has XIP off and reads there
+        return zeros or junk, with no error. Only then is XIP switched on, with the same
+        reset-and-bootrom-call sequence a flash uses. That leaves the core halted: resuming would
+        hit the breakpoint the bootrom call returned to, and a reset would turn XIP off again.
+        A chip running its own code is left alone."""
+        if self.xip_ok or self.swd is None or self.target is None:
+            return False
+        acted = False
+        if self.swd.in_bootrom():
+            flasher = flasher_for(self)
+            if flasher is not None:
+                flasher.prepare()
+                flasher.finish()
+                self.refresh()
+                acted = True
+        self.xip_ok = True
+        return acted
 
     def refresh(self):
         self.state = "halted" if self.swd.is_halted() else "running"

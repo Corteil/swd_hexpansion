@@ -7,7 +7,7 @@ from events.input import BUTTON_TYPES
 from . import ui, uf2
 from .filepicker import FilesTile
 from .leds import RX, TX
-from .tile import ListTile, Tile
+from .tile import ListTile, Tile, flasher_for as _flasher
 
 STAGES = ("Erase", "Program", "Verify")
 BAUDS = (9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600)
@@ -16,21 +16,6 @@ SPEEDS = ((0, "max"), (1, "fast"), (4, "medium"), (20, "slow"))  # (delay_us, la
 
 def _need_link(app):
     app.note("Not available yet")
-
-
-def _flasher(link):
-    """A Flasher for the connected chip, or None when there is no flash algorithm for it."""
-    if not (link.swd and link.target):
-        return None
-    if link.target.name == "RP2350":
-        from .flash_rp2350 import Flasher
-    elif link.target.name == "RP2040":
-        from .flash_rp2040 import Flasher
-    else:
-        return None
-    flasher = Flasher(link.swd, link.target.flash_size)
-    flasher.on_chip = lambda text: setattr(link, "flash_text", text)   # the Connect tile shows it
-    return flasher
 
 
 def _linked(app):
@@ -283,6 +268,9 @@ class MemoryTile(Tile):
         self.words = None
         if swd:
             def read():
+                if 0x10000000 <= self.addr < 0x20000000 and app.link.ensure_xip():
+                    # reads of flash return junk while the chip sits in the bootrom
+                    app.note("XIP on, core halted")
                 self.words = swd.read_block(self.addr, 10)
             app.attempt(read)
 

@@ -438,6 +438,18 @@ class SWD:
     def is_halted(self):
         return bool(self.read32(DHCSR) & S_HALT)
 
+    def in_bootrom(self):
+        """True if the core is executing in the bootrom (0..0x7FFF on both chips). A halt just
+        long enough to read the PC; a core that was already halted stays halted."""
+        was_halted = self.is_halted()
+        if not was_halted:
+            self.halt()
+        try:
+            return self.read_reg(15) < 0x8000
+        finally:
+            if not was_halted:
+                self.resume()
+
     def reset(self):
         """SYSRESETREQ through AIRCR. The link may drop, so callers reconnect afterwards."""
         self.write32(AIRCR, AIRCR_RESET)
