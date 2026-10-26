@@ -28,6 +28,10 @@ RCP_INIT = (0xF45F4806, 0x60014140, 0xF710EE30, 0xEC40D404, 0xEC400780, 0xBF4007
 RT_ARM_SEC = 0x0004  # bootrom table flag: Arm secure function
 ERASE_BLOCK_CMD = 0xD8
 ERASE_TIMEOUT_MS = 10000
+QMI_CSR, QMI_TX, QMI_RX = 0x400D0000, 0x400D0004, 0x400D0008   # direct mode: control, transmit, receive
+CSR_EN, CSR_ASSERT_CS0N, CSR_TXFULL, CSR_RXEMPTY = 1, 1 << 2, 1 << 10, 1 << 16
+MAKERS = {0xEF: "Winbond", 0xC8: "GigaDevice", 0xC2: "Macronix", 0x9D: "ISSI", 0x20: "XMC/Micron",
+          0x85: "Puya", 0x0B: "XTX", 0x5E: "Zbit", 0x1C: "Eon", 0x68: "Boya", 0xA1: "Fudan"}
 
 
 class FlashError(Exception):
@@ -87,6 +91,71 @@ class Flasher:
                 _fail("Flash routines not found", "bootrom has no %s function" % name)
             self.fn[name] = addr
 
+    # --- flash chip identification ---
+    def _spi(self, tx, n_rx):
+        """Send tx bytes to the flash chip and return the n_rx bytes read after them, through the
+        QMI's direct mode as the SDK's flash_do_cmd does. Only valid after connect_internal_flash
+        and exit_xip, before enter_cmd_xip."""
+        swd = self.swd
+        csr = swd.read32(QMI_CSR)
+        swd.write32(QMI_CSR, csr | CSR_ASSERT_CS0N)
+        swd.write32(QMI_CSR, csr | CSR_ASSERT_CS0N | CSR_EN)
+        try:
+            out = []
+            for i in range(len(tx) + n_rx):
+                for _ in range(100):
+                    if not swd.read32(QMI_CSR) & CSR_TXFULL:
+                        break
+                swd.write32(QMI_TX, tx[i] if i < len(tx) else 0)
+                for _ in range(100):
+                    if not swd.read32(QMI_CSR) & CSR_RXEMPTY:
+                        break
+                else:
+                    _fail("Flash chip did not answer", "QMI receive FIFO stayed empty")
+                b = swd.read32(QMI_RX) & 0xFF
+                if i >= len(tx):
+                    out.append(b)
+            return out
+        finally:
+            swd.write32(QMI_CSR, (csr | CSR_ASSERT_CS0N) & ~CSR_EN)
+            swd.write32(QMI_CSR, csr & ~(CSR_EN | CSR_ASSERT_CS0N))
+
+    def jedec_id(self):
+        """(manufacturer, type, capacity code) from command 0x9F, once prepare() has run."""
+        return tuple(self._spi((0x9F,), 3))
+
+    @staticmethod
+    def size_from_id(jedec):
+        """Capacity in bytes from the ID's last byte (a power-of-two exponent for nearly every
+        maker), or None if it does not look like one. Capped at 16 MB: the XIP window and
+        the 24-bit addresses of the bootrom flash functions."""
+        exp = jedec[2]
+        if jedec[0] in (0x00, 0xFF) or not 0x0F <= exp <= 0x1C:
+            return None
+        return min(1 << exp, 16 << 20)
+
+    def describe(self):
+        jedec = self.jedec_id()
+        size = self.size_from_id(jedec)
+        maker = MAKERS.get(jedec[0], "%02X" % jedec[0])
+        text = "%s %s" % (maker, ("%d MB" % (size >> 20)) if size and size >= 1 << 20 else
+                          ("%d KB" % (size >> 10)) if size else "size unknown")
+        return jedec, size, text
+
+    def detect_size(self):
+        """Use the real flash size from here on, if the chip's ID says what it is."""
+        size = self.size_from_id(self.jedec_id())
+        if size:
+            self.flash_size = size
+
+    def probe(self):
+        """(jedec, size or None, description). Resets the chip with the core halted, like a flash."""
+        self.prepare()
+        try:
+            return self.describe()
+        finally:
+            self.finish()
+
     def prepare(self):
         """Reset the chip with the core caught at its first instruction (Secure state, no
         stale faults or stack limits), then do what OpenOCD's rp2350 driver does before it
@@ -104,6 +173,7 @@ class Flasher:
         swd.call(self.fn["state_reset"], (1,), sp=STACK_TOP)   # bootrom_state_reset(current core)
         swd.call(self.fn["connect"], sp=STACK_TOP)
         swd.call(self.fn["exit_xip"], sp=STACK_TOP)
+        self.detect_size()
 
     def finish(self):
         """Flush the cache and put the flash back in XIP mode (readable at 0x10000000)."""

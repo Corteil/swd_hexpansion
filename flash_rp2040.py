@@ -18,8 +18,6 @@ FAMILY_RP2040 = 0xE48BFF56
 IO_QSPI_SS_CTRL = 0x4001800C   # GPIO_QSPI_SS_CTRL, OUTOVER in bits 9:8
 SSI_SR, SSI_DR0 = 0x18000028, 0x18000060
 SR_RFNE = 1 << 3
-MAKERS = {0xEF: "Winbond", 0xC8: "GigaDevice", 0xC2: "Macronix", 0x9D: "ISSI", 0x20: "XMC/Micron",
-          0x85: "Puya", 0x0B: "XTX", 0x5E: "Zbit", 0x1C: "Eon", 0x68: "Boya", 0xA1: "Fudan"}
 
 
 class Flasher(_Flasher):
@@ -60,36 +58,6 @@ class Flasher(_Flasher):
         finally:
             swd.write32(IO_QSPI_SS_CTRL, ctrl)
 
-    def jedec_id(self):
-        """(manufacturer, type, capacity code) from command 0x9F, once prepare() has run."""
-        return tuple(self._spi((0x9F,), 3))
-
-    @staticmethod
-    def size_from_id(jedec):
-        """Capacity in bytes from the ID's last byte (a power-of-two exponent for nearly every
-        maker), or None if it does not look like one. Capped at 16 MB: the XIP window and
-        the 24-bit addresses of the bootrom flash functions."""
-        exp = jedec[2]
-        if jedec[0] in (0x00, 0xFF) or not 0x0F <= exp <= 0x1C:
-            return None
-        return min(1 << exp, 16 << 20)
-
-    def probe(self):
-        """(jedec, size or None, description). Resets the chip with the core halted, like a flash."""
-        self.prepare()
-        try:
-            return self.describe()
-        finally:
-            self.finish()
-
-    def describe(self):
-        jedec = self.jedec_id()
-        size = self.size_from_id(jedec)
-        maker = MAKERS.get(jedec[0], "%02X" % jedec[0])
-        text = "%s %s" % (maker, ("%d MB" % (size >> 20)) if size and size >= 1 << 20 else
-                          ("%d KB" % (size >> 10)) if size else "size unknown")
-        return jedec, size, text
-
     def prepare(self):
         """Reset with the core caught at its first instruction, then get the flash chip into a
         state where it can be erased and programmed."""
@@ -98,9 +66,7 @@ class Flasher(_Flasher):
         self._lookup()
         swd.call(self.fn["connect"], sp=STACK_TOP)
         swd.call(self.fn["exit_xip"], sp=STACK_TOP)
-        size = self.size_from_id(self.jedec_id())
-        if size:
-            self.flash_size = size
+        self.detect_size()
 
     def run(self, path):
         info = uf2.check(path)

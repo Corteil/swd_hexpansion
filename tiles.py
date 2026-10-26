@@ -79,10 +79,10 @@ class ConnectTile(ListTile):
         link = app.link
         if _linked(app) is None:
             return
-        if link.target.name != "RP2040":
-            app.note("Flash ID is RP2040 only")
-            return
         flasher = _flasher(link)
+        if flasher is None:
+            app.note("No flash support for this chip")
+            return
 
         def go():
             jedec, _size, text = flasher.probe()
