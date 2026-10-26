@@ -28,7 +28,9 @@ def _flasher(link):
         from .flash_rp2040 import Flasher
     else:
         return None
-    return Flasher(link.swd, link.target.flash_size)
+    flasher = Flasher(link.swd, link.target.flash_size)
+    flasher.on_chip = lambda text: setattr(link, "flash_text", text)   # the Connect tile shows it
+    return flasher
 
 
 def _linked(app):
@@ -53,7 +55,7 @@ class ConnectTile(ListTile):
         from .targets import TARGETS
         link = app.link
         name = "auto" if link.choice < 0 else TARGETS[link.choice].name
-        return ["Connect", "< Target: %s >" % name, "Read debug ID", "Flash ID", "Disconnect"]
+        return ["Disconnect" if link.target else "Connect", "< Target: %s >" % name, "Read debug ID", "ID Flash"]
 
     def adjust(self, app, i, d):
         from .targets import TARGETS
@@ -63,7 +65,9 @@ class ConnectTile(ListTile):
     def act(self, app, i):
         link = app.link
         if i == 0:
-            if app.attempt(link.connect):
+            if link.target:   # one row that toggles
+                link.close()
+            elif app.attempt(link.connect):
                 app.note("Connected: " + link.target.name)
         elif i == 2:
             swd = _linked(app)
@@ -71,8 +75,6 @@ class ConnectTile(ListTile):
                 app.attempt(lambda: app.note("Debug ID %08X" % swd.dp_read(0)))
         elif i == 3:
             self._flash_id(app)
-        elif i == 4:
-            link.close()
 
     def _flash_id(self, app):
         """Ask the flash chip what it is. Needs a halted, reset chip, so it restarts afterwards."""
@@ -95,8 +97,12 @@ class ConnectTile(ListTile):
     def draw(self, app, ctx):
         super().draw(app, ctx)
         t = app.link.target
-        if t:
-            ui.text(ctx, "flash %08X" % t.flash, 0, 70, ui.MUTED)
+        if t and t.flash_size:
+            # known once ID Flash, Flash or Erase all has read the chip; the profile's size is only a guess
+            known = app.link.flash_text
+            ui.text(ctx, known or "flash --", 0, 68, ui.TEXT if known else ui.MUTED)
+            if not known:
+                ui.text(ctx, "run ID flash", 0, 92, ui.MUTED)
 
 
 class FlashTile(Tile):

@@ -14,6 +14,7 @@ class Link:
         self.delay_us = 0   # SWD half-clock delay: 0 = fastest (~450 kHz), stable on short bench wires
         self.swd = None
         self.leds = None
+        self.flash_text = None  # "Winbond 16 MB" once ID Flash has read the chip
 
     def label(self):
         """Short enough for the top edge of the round display."""
@@ -37,7 +38,7 @@ class Link:
         if self.swd is not None:
             self.swd.disable()
             self.leds.off()
-        self.swd = self.leds = self.target = self.idcode = None
+        self.swd = self.leds = self.target = self.idcode = self.flash_text = None
         self.state = "no link"
 
     def connect(self):

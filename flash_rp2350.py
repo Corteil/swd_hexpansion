@@ -75,6 +75,7 @@ class Flasher:
         self.swd = swd
         self.flash_size = flash_size
         self.fn = {}
+        self.on_chip = None   # called with e.g. "Winbond 16 MB" when prepare() has read the chip's ID
 
     # --- bootrom ---
     def _lookup(self):
@@ -144,9 +145,11 @@ class Flasher:
 
     def detect_size(self):
         """Use the real flash size from here on, if the chip's ID says what it is."""
-        size = self.size_from_id(self.jedec_id())
+        jedec, size, text = self.describe()
         if size:
             self.flash_size = size
+        if self.on_chip:
+            self.on_chip(text)
 
     def probe(self):
         """(jedec, size or None, description). Resets the chip with the core halted, like a flash."""
