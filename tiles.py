@@ -14,6 +14,26 @@ BAUDS = (9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600)
 SPEEDS = ((0, "max"), (1, "fast"), (4, "medium"), (20, "slow"))  # (delay_us, label); 0 is ~450 kHz
 
 
+def next_log_path():
+    """A fresh /sdcard/serial/serial_NNN.txt, or /serial/serial_NNN.txt on the badge's flash when no
+    SD card is mounted. Creates the folder."""
+    import os
+    try:
+        os.listdir("/sdcard")
+        folder = "/sdcard/serial"
+    except OSError:
+        folder = "/serial"
+    try:
+        os.mkdir(folder)
+    except OSError:
+        pass   # already there
+    taken = set(os.listdir(folder))
+    n = 1
+    while "serial_%03d.txt" % n in taken:
+        n += 1
+    return "%s/serial_%03d.txt" % (folder, n)
+
+
 def _need_link(app):
     app.note("Not available yet")
 
@@ -383,6 +403,8 @@ class SerialTile(ListTile):
     LINES = 7       # lines on screen
     WIDTH = 26      # characters per line
     KEEP = 60       # lines of scrollback
+    RAWMAX = 16384  # bytes kept for Save: the received data as it arrived, newest last
+    LONG_MS = 600   # RIGHT held this long starts or stops recording; a shorter press saves a snapshot
 
     def __init__(self):
         super().__init__()
@@ -393,23 +415,35 @@ class SerialTile(ListTile):
         self.lines = [""]
         self.scroll = 0     # lines above the newest
         self.rx_bytes = 0
+        self.raw = bytearray()   # what Save writes: the real bytes, not the wrapped screen lines
+        self.logging = False     # the "long save": append everything received to a file as it arrives
+        self.logfile = None
+        self.logged = 0          # bytes written to it
+        self._flush_at = 0
+        self._rhold = 0          # ms RIGHT has been held, 0 when it is up
+        self._rfired = False     # the long press already acted, so the release must not also save
 
     def summary(self, app):
         return "%d baud" % BAUDS[self.baud]
 
     def rows(self, app):
         return ["Terminal", "< %d baud >" % BAUDS[self.baud],
-                "< TX HS_%s RX HS_%s >" % (("I", "H") if self.swap else ("H", "I"))]
+                "< TX HS_%s RX HS_%s >" % (("I", "H") if self.swap else ("H", "I")),
+                "< Auto-record: %s >" % ("on" if self.logging else "off")]
 
     def adjust(self, app, i, d):
         if i == 1:
             self.baud = (self.baud + d) % len(BAUDS)
         elif i == 2:
             self.swap = not self.swap
+        elif i == 3:
+            self.logging = not self.logging
 
     def act(self, app, i):
         if i == 0:
             app.attempt(lambda: self._open(app))
+        elif i == 3:
+            self.logging = not self.logging
 
     def _open(self, app):
         from machine import UART
@@ -420,11 +454,48 @@ class SerialTile(ListTile):
         self._close()
         self.uart = UART(1, BAUDS[self.baud], tx=tx, rx=rx, rxbuf=1024, timeout=0)
         self.term, self.scroll = True, 0
+        self._rhold, self._rfired = 0, False
+        if self.logging:
+            self._start_log(app)
 
     def _close(self):
+        self._stop_log()
         if self.uart is not None:
             self.uart.deinit()
             self.uart = None
+
+    def _start_log(self, app):
+        """Open a new numbered file; from now on everything received is appended to it."""
+        try:
+            path = next_log_path()
+            self.logfile = open(path, "wb")
+        except Exception as e:   # no space, a read-only card
+            self.logging, self.logfile = False, None
+            app.note("Log off: " + (str(e)[:24] or type(e).__name__))
+            return
+        self.logged = 0
+        self._flush_at = time.ticks_ms()
+        app.note("Recording to " + path.rsplit("/", 1)[-1])   # the folder would not fit in the pop-up
+
+    def _stop_log(self):
+        if self.logfile is not None:
+            try:
+                self.logfile.close()   # flushes what is still buffered
+            except Exception:
+                pass
+            self.logfile = None
+
+    def _log(self, app, data):
+        try:
+            self.logfile.write(data)
+            self.logged += len(data)
+            if time.ticks_diff(time.ticks_ms(), self._flush_at) > 2000:   # at most 2 s of data at risk
+                self.logfile.flush()
+                self._flush_at = time.ticks_ms()
+        except Exception as e:   # card removed or full: say so and stop rather than lose the terminal
+            self._stop_log()
+            self.logging = False
+            app.note("Log stopped: " + (str(e)[:20] or type(e).__name__))
 
     def back(self, app):
         if self.term:
@@ -465,6 +536,11 @@ class SerialTile(ListTile):
             data = None
         if data:
             self.rx_bytes += len(data)
+            self.raw.extend(data)
+            if len(self.raw) > self.RAWMAX:
+                del self.raw[:len(self.raw) - self.RAWMAX]
+            if self.logfile is not None:
+                self._log(app, data)
             self._feed(data)
             app.link.leds.pulse(RX)
         if b.pressed(BUTTON_TYPES["CONFIRM"]):
@@ -475,6 +551,39 @@ class SerialTile(ListTile):
             self.scroll = max(0, self.scroll - 1)
         elif b.pressed(BUTTON_TYPES["LEFT"]):
             self.lines, self.scroll = [""], 0
+            self.raw = bytearray()
+        self._right(app, b, delta)
+
+    def _right(self, app, b, delta):
+        """RIGHT: held for LONG_MS starts or stops recording; released sooner it saves a snapshot.
+        The snapshot is decided on release, so a long press does not also save one."""
+        if b.get(BUTTON_TYPES["RIGHT"]):
+            self._rhold += delta
+            if self._rhold >= self.LONG_MS and not self._rfired:
+                self._rfired = True
+                if self.logfile is not None:
+                    n = self.logged
+                    self._stop_log()
+                    app.note("Recording stopped, %d bytes" % n)
+                else:
+                    self._start_log(app)
+        else:
+            if self._rhold and not self._rfired:
+                self._save(app)
+            self._rhold, self._rfired = 0, False
+
+    def _save(self, app):
+        """Write everything received so far (up to the last RAWMAX bytes) to a new numbered file."""
+        if not self.raw:
+            app.note("Nothing received to save")
+            return
+
+        def write():
+            path = next_log_path()
+            with open(path, "wb") as f:
+                f.write(self.raw)
+            app.note("Saved %d bytes to %s" % (len(self.raw), path))
+        app.attempt(write)
 
     def _send(self, app, text):
         if self.uart is not None:
@@ -489,8 +598,14 @@ class SerialTile(ListTile):
         for r, line in enumerate(self.lines[max(0, end - self.LINES):end]):
             ui.text(ctx, line or " ", 0, -52 + r * 17, ui.TEXT if r == min(end, self.LINES) - 1 else ui.MUTED,
                     ui.tiny_font_size * 0.9)
-        ui.text(ctx, "%d baud  rx %d" % (BAUDS[self.baud], self.rx_bytes), 0, 74, self.colour, ui.tiny_font_size * 0.85)
-        ui.text(ctx, "OK send  LEFT clear", 0, 88, ui.MUTED, ui.tiny_font_size * 0.85)
+        if self.logfile is not None:   # recording: show how much has gone to the file
+            n = self.logged
+            status = "%d baud  REC %s" % (BAUDS[self.baud], "%d B" % n if n < 10000 else "%d KB" % (n >> 10))
+            ui.text(ctx, status, 0, 74, ui.WARN, ui.tiny_font_size * 0.85)
+        else:
+            ui.text(ctx, "%d baud  rx %d" % (BAUDS[self.baud], self.rx_bytes), 0, 74, self.colour, ui.tiny_font_size * 0.85)
+        ui.text(ctx, "OK send <clear >save", 0, 88, ui.MUTED, ui.tiny_font_size * 0.85)
+        ui.text(ctx, "hold > rec", 0, 101, ui.MUTED, ui.tiny_font_size * 0.85)
 
 
 class SettingsTile(ListTile):
