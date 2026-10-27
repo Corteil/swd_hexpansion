@@ -70,7 +70,14 @@ def windows(path):
         yield base, buf
 
 
+MAX_FLASH = 16 << 20   # the XIP window, and what the bootrom flash functions can address
+CRC_BYTES = 252        # RP2040 boot loader: checksum of the first 252 bytes, stored in the last 4 of 256
+
+
 class Flasher:
+    CHIP = "RP2350"
+    FAMILIES_OK = (uf2.FAMILY_RP2350_ARM_S, uf2.FAMILY_RP2350_ARM_NS, uf2.FAMILY_RP2350_RISCV, uf2.FAMILY_DATA)
+
     def __init__(self, swd, flash_size=4 << 20):
         self.swd = swd
         self.flash_size = flash_size
@@ -91,6 +98,33 @@ class Flasher:
             if not addr:
                 _fail("Flash routines not found", "bootrom has no %s function" % name)
             self.fn[name] = addr
+
+    # --- is this file suitable for this chip? ---
+    def check(self, path):
+        """Vet a .uf2 or .bin before anything is erased: it must be a sound file, built for this chip,
+        aimed at flash, small enough for it, and an image that starts at the beginning of flash must
+        carry the header this chip's bootrom looks for (otherwise it would flash and never run).
+        Raises uf2.UF2Error or FlashError with a message for the pop-up; returns the file's summary."""
+        info = uf2.check(path)
+        if not info["bytes"]:
+            _fail("File is empty")
+        fam = info["family"]
+        if fam is not None and fam not in self.FAMILIES_OK:
+            chip = uf2.chip_of(fam)   # short messages: they have to fit the round screen
+            _fail("%s file, not %s" % (chip, self.CHIP) if chip else "Wrong chip family",
+                  "UF2 family %s (%08X)" % (uf2.family_name(fam), fam))
+        if not XIP <= info["start"] < XIP + MAX_FLASH:   # RAM, peripherals, or past the flash window
+            _fail("File is not for flash", "starts at %08X" % info["start"])
+        if info["end"] > XIP + MAX_FLASH:
+            _fail("File too big for flash", "ends at %08X" % info["end"])
+        if info["start"] == XIP and fam != uf2.FAMILY_DATA:
+            self._check_boot(info["head"], info["head_have"])
+        return info
+
+    def _check_boot(self, head, have):
+        """RP2350: a flash image carries an IMAGE_DEF block, which opens with the word 0xFFFFDED3."""
+        if struct.pack("<I", 0xFFFFDED3) not in head:
+            _fail("No RP2350 header")
 
     # --- flash chip identification ---
     def _spi(self, tx, n_rx):
@@ -234,13 +268,13 @@ class Flasher:
         yield 3, 1.0
 
     def run(self, path):
-        info = uf2.check(path)
+        info = self.check(path)
         total = ((info["end"] or 0) - ((info["start"] or 0) & ~(SECTOR - 1)) + SECTOR - 1) // SECTOR * SECTOR
         yield 0, 0.0
         self.prepare()   # may find the real flash size, so the size check comes after it
         try:
             if info["start"] is None or info["start"] < XIP or info["end"] > XIP + self.flash_size:
-                _fail("File does not fit in flash", "image %s to %s, flash %d" % (info["start"], info["end"], self.flash_size))
+                _fail("File too big for flash", "image %s to %s, flash %d" % (info["start"], info["end"], self.flash_size))
             for f in self.erase(info["start"], info["end"]):
                 yield 0, f
             for f in self.program(path, total):

@@ -10,17 +10,41 @@ every reconnect (a plain line reset would select the rescue DP, see swd_rp2350.r
 The flash size is read from the chip's JEDEC ID (see jedec_id); targets.py's 2 MB, what a Pico
 has, is used when the ID is not one that encodes a capacity.
 """
+import struct
+
 from . import uf2
-from .flash_rp2350 import Flasher as _Flasher, STACK_TOP, _code, _fail
+from .flash_rp2350 import CRC_BYTES, Flasher as _Flasher, STACK_TOP, _code, _fail
 
 TARGETSEL_CORE0 = 0x01002927
-FAMILY_RP2040 = 0xE48BFF56
 IO_QSPI_SS_CTRL = 0x4001800C   # GPIO_QSPI_SS_CTRL, OUTOVER in bits 9:8
 SSI_SR, SSI_DR0 = 0x18000028, 0x18000060
 SR_RFNE = 1 << 3
 
 
+def _crc32(data):
+    """The boot loader's checksum: CRC-32, polynomial 0x04C11DB7, seed 0xFFFFFFFF, no bit reversal."""
+    crc = 0xFFFFFFFF
+    for b in data:
+        crc ^= b << 24
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x04C11DB7) & 0xFFFFFFFF if crc & 0x80000000 else (crc << 1) & 0xFFFFFFFF
+    return crc
+
+
+def _covers(have, start, end):
+    """True if the (offset, length) pieces in have cover every byte from start to end."""
+    pos = start
+    for off, n in sorted(have):
+        if off > pos:
+            break
+        pos = max(pos, off + n)
+    return pos >= end
+
+
 class Flasher(_Flasher):
+    CHIP = "RP2040"
+    FAMILIES_OK = (uf2.FAMILY_RP2040, uf2.FAMILY_DATA)
+
     def _lookup(self):
         swd = self.swd
         table = swd.read32(0x14) & 0xFFFF       # bootrom function table
@@ -68,8 +92,10 @@ class Flasher(_Flasher):
         swd.call(self.fn["exit_xip"], sp=STACK_TOP)
         self.detect_size()
 
-    def run(self, path):
-        info = uf2.check(path)
-        if info["family"] not in (None, FAMILY_RP2040):
-            _fail("File is for another chip", "UF2 family %08X" % info["family"])
-        yield from _Flasher.run(self, path)
+    def _check_boot(self, head, have):
+        """RP2040: the first 256 bytes are the second-stage boot loader, whose last four bytes are a
+        CRC-32 of the other 252 (the bootrom refuses to start an image without it)."""
+        if not _covers(have, 0, 256):
+            _fail("No RP2040 boot loader")
+        if _crc32(head[:CRC_BYTES]) != struct.unpack("<I", head[CRC_BYTES:256])[0]:
+            _fail("Bad RP2040 boot loader")

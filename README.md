@@ -14,7 +14,7 @@ debug pads into a proto hexpansion in another slot and program it from the badge
 | Tile | What you can do |
 |---|---|
 | **Connect** | Wake the target and read its debug ID, pick the chip type (or auto-detect), read the flash chip's maker and size. |
-| **Flash** | Erase, program and verify a `.uf2` or `.bin`, with a progress ring. Erase the whole flash. |
+| **Flash** | Check a `.uf2` or `.bin` suits the chip, then erase, program and verify it, with a progress ring. Erase the whole flash. |
 | **Files** | Browse the badge's storage and the SD card, and choose the file to flash (with a confirm step). |
 | **Memory** | Read memory a screen at a time, jump to any address. |
 | **Core** | Halt, resume, single-step and reset the target's CPU, with PC and SP shown. |
@@ -122,6 +122,17 @@ so a failure shows as a timeout or a verify mismatch.
 
 The flash size is read from the chip's JEDEC ID (command `0x9F`, through the RP2040's SSI or the
 RP2350's QMI), capped at 16 MB. Flash, Erase all and the size check all use it.
+
+**Every file is vetted for the connected chip before anything is erased** (`Flasher.check`, also shown
+on the Files tile's confirm screen). It must be a sound, non-empty file; a UF2's family must be the
+chip's (RP2040; or RP2350 Arm-S, Arm-NS or RISC-V; the `data` family suits both); it must be aimed at
+flash and fit in it; and an image starting at the beginning of flash must carry what that chip's
+bootrom needs to run it. On the RP2040 that is a second-stage boot loader whose last four bytes are a
+CRC-32 (polynomial `0x04C11DB7`, seed `0xFFFFFFFF`, no bit reversal) of the first 252; on the RP2350 it is
+an `IMAGE_DEF` block, found by its opening word `0xFFFFDED3` in the first 4 KB. Without these an image
+would flash and verify but never boot. Both checks were validated against real images (an SDK build and a
+MicroPython image for the RP2040, an SDK build and the Metro's HDMI image for the RP2350) before being
+enforced. The final size check runs after the chip's flash size has been read.
 
 Measured speed, end to end including verify: about 10 to 15 KB/s. Erasing the whole flash takes
 3 s for 4 MB, 29 s for 8 MB and 68 s for 16 MB.

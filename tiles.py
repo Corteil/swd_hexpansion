@@ -158,6 +158,15 @@ class FlashTile(Tile):
         self.stage, self.frac, self.simulated, self.erasing = 0, 0.0, False, True
         self.gen = flasher.erase_all()
 
+    def _vet(self, app):
+        """Check the chosen file suits the connected chip. With no RP2040 or RP2350 connected there is
+        nothing to check it against, so only that it is a sound file (the dry run writes nothing)."""
+        flasher = _flasher(app.link)
+        if flasher is not None:
+            flasher.check(app.selected)
+        else:
+            uf2.check(app.selected)
+
     def _start(self, app):
         flasher = _flasher(app.link)
         self.stage, self.frac, self.gen, self.erasing = 0, 0.0, None, False
@@ -229,7 +238,7 @@ class FlashTile(Tile):
                 app.open_picker("flash")
             elif not app.selected:
                 app.note("No file selected")
-            elif app.attempt(lambda: uf2.check(app.selected)):  # reject a damaged file before touching the target
+            elif app.attempt(lambda: self._vet(app)):   # reject an unsuitable file before touching the target
                 self._start(app)
 
     def back(self, app):

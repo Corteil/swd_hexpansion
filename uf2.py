@@ -16,7 +16,28 @@ FLAG_FAMILY = 0x2000
 FLAG_NOT_MAIN = 0x1
 FAMILY_ABSOLUTE = 0xE48BFF57
 BLOCK = 512
-BIN_BASE = 0x10000000  # RP2350 XIP flash, where a raw .bin is assumed to load
+BIN_BASE = 0x10000000  # XIP flash on both chips, where a raw .bin is assumed to load
+HEAD = 4096            # bytes from the flash base kept for the boot-header checks
+
+FAMILY_RP2040, FAMILY_DATA = 0xE48BFF56, 0xE48BFF58
+FAMILY_RP2350_ARM_S, FAMILY_RP2350_RISCV, FAMILY_RP2350_ARM_NS = 0xE48BFF59, 0xE48BFF5A, 0xE48BFF5B
+FAMILY_NAMES = {
+    FAMILY_RP2040: "RP2040", FAMILY_ABSOLUTE: "absolute", FAMILY_DATA: "data",
+    FAMILY_RP2350_ARM_S: "RP2350 ARM-S", FAMILY_RP2350_RISCV: "RP2350 RISC-V", FAMILY_RP2350_ARM_NS: "RP2350 ARM-NS",
+}
+
+
+def chip_of(fam):
+    """The chip a UF2 family is for ("RP2040" or "RP2350"), or None for the data and absolute families."""
+    if fam == FAMILY_RP2040:
+        return "RP2040"
+    if fam in (FAMILY_RP2350_ARM_S, FAMILY_RP2350_RISCV, FAMILY_RP2350_ARM_NS):
+        return "RP2350"
+    return None
+
+
+def family_name(fam):
+    return FAMILY_NAMES.get(fam, "family %08X" % fam)
 
 
 class UF2Error(Exception):
@@ -70,11 +91,15 @@ def check(path):
     """Summary dict for a file: raises UF2Error for a damaged .uf2."""
     if not path.lower().endswith(".uf2"):
         size = os.stat(path)[6]
-        return {"kind": "bin", "bytes": size, "start": BIN_BASE, "end": BIN_BASE + size, "family": None, "blocks": 0}
+        with open(path, "rb") as f:
+            head = f.read(HEAD)
+        return {"kind": "bin", "bytes": size, "start": BIN_BASE, "end": BIN_BASE + size, "family": None,
+                "blocks": 0, "head": head, "head_have": [(0, len(head))]}
     size = os.stat(path)[6]
     if size % BLOCK:
         _bad("UF2 file is damaged", "size is not a multiple of 512")
     lo, hi, count, fam, nbytes = None, 0, 0, None, 0
+    head, have = bytearray(HEAD), []   # the image's first HEAD bytes at the flash base, and which of them are present
     totals = {}   # family -> block count the file claims
     seen = {}     # family -> set of block numbers
     with open(path, "rb") as f:
@@ -100,7 +125,13 @@ def check(path):
             nbytes += len(data)
             lo = addr if lo is None else min(lo, addr)
             hi = max(hi, addr + len(data))
+            if BIN_BASE <= addr < BIN_BASE + HEAD:
+                off = addr - BIN_BASE
+                n = min(len(data), HEAD - off)
+                head[off:off + n] = data[:n]
+                have.append((off, n))
     for key, total in totals.items():
         if key != FAMILY_ABSOLUTE and len(seen[key]) != total:
             _bad("UF2 file is incomplete", "expected %d blocks, found %d" % (total, len(seen[key])))
-    return {"kind": "uf2", "bytes": nbytes, "start": lo, "end": hi, "family": fam, "blocks": count}
+    return {"kind": "uf2", "bytes": nbytes, "start": lo, "end": hi, "family": fam, "blocks": count,
+            "head": bytes(head), "head_have": have}

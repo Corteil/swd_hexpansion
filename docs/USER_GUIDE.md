@@ -100,8 +100,23 @@ Rows: **Choose file**, **Start**, **Erase all**.
   nothing written.
 
 Files can be `.uf2` or `.bin`. A `.uf2` carries its own addresses. A `.bin` is written at the start of
-the flash. Files are checked before anything is erased: a file that will not fit in the flash is
-refused, and an RP2040 also refuses a UF2 built for another chip (`File is for another chip`).
+the flash.
+
+**Every file is checked against the connected chip before anything is erased**, and refused with a short
+reason if it does not suit it:
+
+| Check | Refused with |
+|---|---|
+| The file is empty or damaged | `File is empty`, `UF2 file is damaged`, ... |
+| A UF2 was built for the other chip (an RP2040 chip takes RP2040 files; an RP2350 takes the RP2350 families, Arm or RISC-V) | `RP2350 file, not RP2040` |
+| A UF2 with an unknown chip family | `Wrong chip family` |
+| It is aimed at something other than flash (RAM, for example) | `File is not for flash` |
+| It will not fit in the chip's flash | `File too big for flash` |
+| An image starting at the beginning of flash lacks the header the chip needs to run it: on an RP2040 a boot loader with a correct checksum, on an RP2350 an image header | `Bad RP2040 boot loader`, `No RP2350 header` |
+
+Files that start somewhere other than the beginning of flash, and UF2 files in the `data` family (partitions
+and data written alongside a program), skip the header check. With no RP2040 or RP2350 connected there is
+nothing to check against, so only the file itself is tested.
 
 ### Files
 
@@ -111,6 +126,9 @@ Browses the badge's own storage and the SD card for `.uf2` and `.bin` files.
   it is long.
 - Press OK on a file and you get a **`Use this file?`** screen with its name, size, block count and chip
   family. Press OK again to choose it, or CANCEL to go back to the list. Nothing is chosen until the second OK.
+- When a chip is connected, the screen also checks the file against it: a green **`Suits RP2350`** (or
+  RP2040), or an amber reason such as `RP2040 file, not RP2350`. You can still choose a file that does not
+  suit, but Flash will refuse it. With nothing connected it says `connect to check it`.
 - When you opened Files from Flash, choosing a file takes you straight back to Flash.
 
 ### Memory
@@ -259,8 +277,13 @@ or `Resume` to let it run.
 | `Target debug will not power up` | The chip's debug domain did not wake. | Power-cycle the target, or try Rescue DP. |
 | `Not connected` | An action needs a connection first. | Connect → Connect. |
 | `No file selected` | Flash → Start with no file chosen. | Choose a file first. |
-| `File does not fit in flash` | The image goes past the end of the chip's flash, or before its start. | Check the file is for this board; `ID Flash` shows the real flash size. |
-| `File is for another chip` | A UF2 built for a different chip family. | Use a UF2 for this chip. |
+| `File too big for flash` | The image goes past the end of the chip's flash. | Check the file is for this board; `ID Flash` shows the real flash size. |
+| `File is not for flash` | The file is aimed at RAM or another address, not flash. | Use a flash image; build the program for flash, not RAM. |
+| `RP2350 file, not RP2040` (or the other way round) | A UF2 built for a different chip. | Use a UF2 for the connected chip. |
+| `Wrong chip family` | The UF2 names a chip family the app does not know. | Rebuild the UF2 for this chip. |
+| `Bad RP2040 boot loader`, `No RP2040 boot loader` | The image does not start with a valid RP2040 boot loader, so the chip would not run it. | Check the file is a full RP2040 flash image. |
+| `No RP2350 header` | The image has no RP2350 image header, so the chip would not run it. | Check the file is a full RP2350 flash image. |
+| `File is empty`, `UF2 file is damaged` | The file is empty or has been corrupted. | Copy it again or rebuild it. |
 | `File is not in address order` | The UF2's blocks are out of order. | Re-export the UF2. |
 | `Verify failed at ...` | What was read back did not match. | Flash again; try a slower SWD speed (Settings). |
 | `Erase failed at ...` | A block did not erase. | Try again; check the target's power. |

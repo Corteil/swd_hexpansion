@@ -8,8 +8,8 @@ from the Flash tile it returns to Flash as soon as a file is chosen.
 import os
 import struct
 
-from . import ui
-from .tile import Tile
+from . import ui, uf2
+from .tile import Tile, flasher_for
 
 try:
     import vfs
@@ -20,10 +20,7 @@ EXTS = (".uf2", ".bin")
 ROWS = 5
 MIN_CARD_BYTES = 256 << 10  # smaller mounts (hexpansion EEPROMs, ~8 KB) aren't storage
 UF2_MAGIC0, UF2_MAGIC1 = 0x0A324655, 0x9E5D5157
-FAMILIES = {
-    0xE48BFF56: "RP2040", 0xE48BFF57: "absolute", 0xE48BFF58: "data",
-    0xE48BFF59: "RP2350 ARM-S", 0xE48BFF5A: "RP2350 RISC-V", 0xE48BFF5B: "RP2350 ARM-NS",
-}
+FAMILIES = uf2.FAMILY_NAMES
 S_IFDIR = 0x4000
 
 
@@ -177,6 +174,7 @@ class FilesTile(Tile):
         self.picker = FilePicker()
         self.pick_from = None  # key of the tile to return to once a file is chosen
         self.pending = None    # a file waiting for its second OK
+        self.verdict = None    # (ok, text) from checking it against the connected chip, or None
 
     def summary(self, app):
         return ui.clip(app.selected.rsplit("/", 1)[-1], 24) if app.selected else self.hint
@@ -185,9 +183,21 @@ class FilesTile(Tile):
         self.pending = None
         self.picker.show_storages()
 
+    def _judge(self, app, path):
+        """Does this file suit the connected chip? Worked out once, when the confirm screen opens, not
+        every frame. None when no RP2040 or RP2350 is connected to check it against."""
+        flasher = flasher_for(app.link)
+        if flasher is None:
+            return None
+        try:
+            flasher.check(path)
+        except Exception as e:   # UF2Error or FlashError: the message is meant for the screen
+            return (False, str(e) or type(e).__name__)
+        return (True, "Suits %s" % flasher.CHIP)
+
     def back(self, app):
         if self.pending:   # CANCEL on the confirm screen: back to the list, nothing chosen
-            self.pending = None
+            self.pending, self.verdict = None, None
             return True
         if self.picker.back():
             return True
@@ -201,7 +211,7 @@ class FilesTile(Tile):
         p = self.picker
         if self.pending:   # the confirm screen: only OK (or CANCEL, see back) does anything
             if b.pressed(BUTTON_TYPES["CONFIRM"]):
-                app.selected, self.pending = self.pending, None
+                app.selected, self.pending, self.verdict = self.pending, None, None
                 if self.pick_from:
                     app.close_picker()
                 else:
@@ -213,6 +223,8 @@ class FilesTile(Tile):
             p.move(-1)
         elif b.pressed(BUTTON_TYPES["CONFIRM"]):
             self.pending = p.activate()   # a file asks for confirmation; a folder just opens
+            if self.pending:
+                self.verdict = self._judge(app, self.pending)
         else:
             for ch in "abcdefghijklmnopqrstuvwxyz":
                 key = app.keyboard.get(ch.upper())
@@ -222,12 +234,17 @@ class FilesTile(Tile):
 
     def _draw_confirm(self, ctx):
         ui.icon(ctx, "files", 0, -68, 12, self.colour)
-        ui.text(ctx, "Use this file?", 0, -38, ui.TEXT, ui.label_font_size)
-        ui.text(ctx, self.pending.rsplit("/", 1)[-1], 0, -12, self.colour, tail=7)
+        ui.text(ctx, "Use this file?", 0, -42, ui.TEXT, ui.label_font_size)
+        ui.text(ctx, self.pending.rsplit("/", 1)[-1], 0, -18, self.colour, tail=7)
         for k, line in enumerate(describe(self.pending)):
-            ui.text(ctx, ui.clip(line, 26), 0, 10 + k * 18, ui.MUTED)
-        ui.text(ctx, "OK to confirm", 0, 55, ui.OK)
-        ui.text(ctx, "Cancel to go back", 0, 73, ui.MUTED)
+            ui.text(ctx, ui.clip(line, 26), 0, 2 + k * 17, ui.MUTED)
+        if self.verdict is None:
+            ui.text(ctx, "connect to check it", 0, 40, ui.MUTED)
+        else:   # green when the connected chip can take it, amber with the reason when it cannot
+            ok, text = self.verdict
+            ui.text(ctx, ui.clip(text, 28), 0, 40, ui.OK if ok else ui.WARN)
+        ui.text(ctx, "OK to confirm", 0, 58, ui.TEXT)
+        ui.text(ctx, "Cancel to go back", 0, 75, ui.MUTED)
 
     def draw(self, app, ctx):
         if self.pending:
