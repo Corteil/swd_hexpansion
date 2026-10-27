@@ -531,18 +531,17 @@ class SerialTile(ListTile):
             return
         try:
             data = self.uart.read()
-        except Exception as e:
-            app.note(str(e)[:40])
-            data = None
-        if data:
-            self.rx_bytes += len(data)
-            self.raw.extend(data)
-            if len(self.raw) > self.RAWMAX:
-                del self.raw[:len(self.raw) - self.RAWMAX]
-            if self.logfile is not None:
-                self._log(app, data)
-            self._feed(data)
-            app.link.leds.pulse(RX)
+            if data:
+                self.rx_bytes += len(data)
+                self.raw.extend(data)
+                if len(self.raw) > self.RAWMAX:
+                    self.raw = self.raw[-self.RAWMAX:]   # a bytearray cannot delete a slice here
+                if self.logfile is not None:
+                    self._log(app, data)
+                self._feed(data)
+                app.link.leds.pulse(RX)
+        except Exception as e:   # whatever goes wrong with the data must not take the buttons down too
+            app.note("Serial: " + (str(e)[:30] or type(e).__name__))
         if b.pressed(BUTTON_TYPES["CONFIRM"]):
             app.ask_text("Send (+ newline)", "", lambda t: self._send(app, t))
         elif b.pressed(BUTTON_TYPES["UP"]):
@@ -600,7 +599,8 @@ class SerialTile(ListTile):
                     ui.tiny_font_size * 0.9)
         if self.logfile is not None:   # recording: show how much has gone to the file
             n = self.logged
-            status = "%d baud  REC %s" % (BAUDS[self.baud], "%d B" % n if n < 10000 else "%d KB" % (n >> 10))
+            size = "%d B" % n if n < 10240 else "%d KB" % (n >> 10) if n < 1 << 20 else "%.1f MB" % (n / (1 << 20))
+            status = "%d baud  REC %s" % (BAUDS[self.baud], size)
             ui.text(ctx, status, 0, 74, ui.WARN, ui.tiny_font_size * 0.85)
         else:
             ui.text(ctx, "%d baud  rx %d" % (BAUDS[self.baud], self.rx_bytes), 0, 74, self.colour, ui.tiny_font_size * 0.85)
