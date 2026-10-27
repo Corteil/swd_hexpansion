@@ -176,14 +176,19 @@ class FilesTile(Tile):
     def __init__(self):
         self.picker = FilePicker()
         self.pick_from = None  # key of the tile to return to once a file is chosen
+        self.pending = None    # a file waiting for its second OK
 
     def summary(self, app):
         return ui.clip(app.selected.rsplit("/", 1)[-1], 24) if app.selected else self.hint
 
     def enter(self, app):
+        self.pending = None
         self.picker.show_storages()
 
     def back(self, app):
+        if self.pending:   # CANCEL on the confirm screen: back to the list, nothing chosen
+            self.pending = None
+            return True
         if self.picker.back():
             return True
         if self.pick_from:
@@ -194,18 +199,20 @@ class FilesTile(Tile):
     def update(self, app, b, delta):
         from events.input import BUTTON_TYPES
         p = self.picker
+        if self.pending:   # the confirm screen: only OK (or CANCEL, see back) does anything
+            if b.pressed(BUTTON_TYPES["CONFIRM"]):
+                app.selected, self.pending = self.pending, None
+                if self.pick_from:
+                    app.close_picker()
+                else:
+                    app.note("File ready to flash")
+            return
         if b.pressed(BUTTON_TYPES["DOWN"]):
             p.move(1)
         elif b.pressed(BUTTON_TYPES["UP"]):
             p.move(-1)
         elif b.pressed(BUTTON_TYPES["CONFIRM"]):
-            path = p.activate()
-            if path:
-                app.selected = path
-                if self.pick_from:
-                    app.close_picker()
-                else:
-                    app.note("File ready to flash")
+            self.pending = p.activate()   # a file asks for confirmation; a folder just opens
         else:
             for ch in "abcdefghijklmnopqrstuvwxyz":
                 key = app.keyboard.get(ch.upper())
@@ -213,11 +220,24 @@ class FilesTile(Tile):
                     p.jump(ch)
                     break
 
+    def _draw_confirm(self, ctx):
+        ui.icon(ctx, "files", 0, -68, 12, self.colour)
+        ui.text(ctx, "Use this file?", 0, -38, ui.TEXT, ui.label_font_size)
+        ui.text(ctx, self.pending.rsplit("/", 1)[-1], 0, -12, self.colour, tail=7)
+        for k, line in enumerate(describe(self.pending)):
+            ui.text(ctx, ui.clip(line, 26), 0, 10 + k * 18, ui.MUTED)
+        ui.text(ctx, "OK to confirm", 0, 55, ui.OK)
+        ui.text(ctx, "Cancel to go back", 0, 73, ui.MUTED)
+
     def draw(self, app, ctx):
+        if self.pending:
+            self._draw_confirm(ctx)
+            return
         p = self.picker
         ui.icon(ctx, "files", -62, -74, 10, self.colour)
         where = "storage" if p.path is None else p.path
-        ui.text(ctx, ui.clip(where[-18:], 18), 8, -74, ui.MUTED, align="c")
+        # left-aligned beside the icon, shortened at the front so the folder you are in stays visible
+        ui.text(ctx, where, -48, -74, ui.MUTED, align="l", tail=9)
         if not p.entries:
             ui.text(ctx, p.error or "no .uf2 or .bin here", 0, -10, ui.MUTED)
         for r in range(ROWS):

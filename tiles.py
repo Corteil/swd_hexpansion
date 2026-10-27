@@ -185,6 +185,10 @@ class FlashTile(Tile):
                     self.frac = 0.0
                     self.stage += 1
             return
+        if self.stage >= len(STAGES):   # the "Done" screen: OK dismisses it, nothing starts behind it
+            if b.pressed(BUTTON_TYPES["CONFIRM"]):
+                self.stage, self.erasing = -1, False
+            return
         if b.pressed(BUTTON_TYPES["DOWN"]):
             self.cur, self.armed = (self.cur + 1) % 3, False
         elif b.pressed(BUTTON_TYPES["UP"]):
@@ -246,7 +250,7 @@ class MemoryTile(Tile):
 
     def __init__(self):
         self.addr = 0x20000000
-        self.words = None  # last block read, or None
+        self.rows = None   # what _load read, see there
         self._app = None
 
     def summary(self, app):
@@ -263,16 +267,37 @@ class MemoryTile(Tile):
                 return
 
     def _load(self, app):
-        """Read the 10 words on screen. Done on a change, never per frame."""
+        """Read the 10 words on screen, a row (2 words) at a time so one unreadable row, a window
+        that starts below RAM for instance, does not blank the rows that are fine. Done on a
+        change, never per frame."""
         swd = app.link.swd if app.link.target else None
-        self.words = None
-        if swd:
-            def read():
-                if 0x10000000 <= self.addr < 0x20000000 and app.link.ensure_xip():
-                    # reads of flash return junk while the chip sits in the bootrom
-                    app.note("XIP on, core halted")
-                self.words = swd.read_block(self.addr, 10)
-            app.attempt(read)
+        self.rows = None   # None: no link. Else one entry per row: (word, word), or None if unreadable
+        if not swd:
+            return
+
+        def read():
+            if 0x10000000 <= self.addr < 0x20000000 and app.link.ensure_xip():
+                # reads of flash return junk while the chip sits in the bootrom
+                app.note("XIP on, core halted")
+            rows, bad = [], None
+            for r in range(5):
+                a = (self.addr + r * 8) & 0xFFFFFFFF
+                try:
+                    rows.append(tuple(swd.read_block(a, 2)))
+                except Exception:   # SWDError: nothing is mapped there
+                    rows.append(None)
+                    bad = bad if bad is not None else a
+                    # An unmapped read leaves the target not answering at all, good addresses
+                    # included, until the link is brought up again.
+                    try:
+                        app.link.connect()
+                    except Exception:
+                        rows.extend([None] * (4 - r))   # the link is gone: leave the rest unread
+                        break
+            self.rows = rows
+            if bad is not None:
+                app.note("No memory at %08X" % bad)
+        app.attempt(read)
 
     def _set_addr(self, s):
         try:
@@ -289,8 +314,11 @@ class MemoryTile(Tile):
         ui.icon(ctx, "memory", 0, -70, 12, self.colour)
         for r in range(5):
             a = self.addr + r * 8
-            w = self.words
-            cells = ("%08X" % w[r * 2], "%08X" % w[r * 2 + 1]) if w else ("--------", "--------")
+            w = self.rows[r] if self.rows else None
+            if w:
+                cells = ("%08X" % w[0], "%08X" % w[1])
+            else:   # dashes: no link yet; question marks: this row could not be read
+                cells = ("--------",) * 2 if self.rows is None else ("????????",) * 2
             ui.text(ctx, "%08X  %s  %s" % ((a & 0xFFFFFFFF,) + cells), 0, -38 + r * 20, ui.TEXT if r == 0 else ui.MUTED, ui.tiny_font_size * 0.85)
         ui.text(ctx, "OK to enter address", 0, 70, ui.MUTED)
 
