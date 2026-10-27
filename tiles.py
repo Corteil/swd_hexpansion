@@ -14,9 +14,14 @@ BAUDS = (9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600)
 SPEEDS = ((0, "max"), (1, "fast"), (4, "medium"), (20, "slow"))  # (delay_us, label); 0 is ~450 kHz
 
 
-def next_log_path():
-    """A fresh /sdcard/serial/serial_NNN.txt, or /serial/serial_NNN.txt on the badge's flash when no
-    SD card is mounted. Creates the folder."""
+def clock_set():
+    """True once the badge knows the real time (over WiFi): until then its clock counts from 2000."""
+    return time.localtime()[0] >= 2024
+
+
+def next_log_path(tag=""):
+    """A fresh /sdcard/serial/serial_<tag>NNN.txt, or /serial/... on the badge's flash when no SD card
+    is mounted. Creates the folder. Each tag (recordings: none, snapshots: "snap_") counts on its own."""
     import os
     try:
         os.listdir("/sdcard")
@@ -29,9 +34,9 @@ def next_log_path():
         pass   # already there
     taken = set(os.listdir(folder))
     n = 1
-    while "serial_%03d.txt" % n in taken:
+    while "serial_%s%03d.txt" % (tag, n) in taken:
         n += 1
-    return "%s/serial_%03d.txt" % (folder, n)
+    return "%s/serial_%s%03d.txt" % (folder, tag, n)
 
 
 def _need_link(app):
@@ -416,6 +421,9 @@ class SerialTile(ListTile):
         self.scroll = 0     # lines above the newest
         self.rx_bytes = 0
         self.raw = bytearray()   # what Save writes: the real bytes, not the wrapped screen lines
+        self.stamp = False       # put a time at the start of every line of the saved text
+        self._bol = True         # the next received byte starts a line
+        self._t0 = 0             # ticks_ms when the terminal opened: stamps count from here without a clock
         self.logging = False     # the "long save": append everything received to a file as it arrives
         self.logfile = None
         self.logged = 0          # bytes written to it
@@ -429,7 +437,8 @@ class SerialTile(ListTile):
     def rows(self, app):
         return ["Terminal", "< %d baud >" % BAUDS[self.baud],
                 "< TX HS_%s RX HS_%s >" % (("I", "H") if self.swap else ("H", "I")),
-                "< Auto-record: %s >" % ("on" if self.logging else "off")]
+                "< Auto-record: %s >" % ("on" if self.logging else "off"),
+                "< Stamp: %s >" % (("clock" if clock_set() else "elapsed") if self.stamp else "off")]
 
     def adjust(self, app, i, d):
         if i == 1:
@@ -438,12 +447,16 @@ class SerialTile(ListTile):
             self.swap = not self.swap
         elif i == 3:
             self.logging = not self.logging
+        elif i == 4:
+            self.stamp = not self.stamp
 
     def act(self, app, i):
         if i == 0:
             app.attempt(lambda: self._open(app))
         elif i == 3:
             self.logging = not self.logging
+        elif i == 4:
+            self.stamp = not self.stamp
 
     def _open(self, app):
         from machine import UART
@@ -455,6 +468,7 @@ class SerialTile(ListTile):
         self.uart = UART(1, BAUDS[self.baud], tx=tx, rx=rx, rxbuf=1024, timeout=0)
         self.term, self.scroll = True, 0
         self._rhold, self._rfired = 0, False
+        self._bol, self._t0 = True, time.ticks_ms()
         if self.logging:
             self._start_log(app)
 
@@ -463,6 +477,32 @@ class SerialTile(ListTile):
         if self.uart is not None:
             self.uart.deinit()
             self.uart = None
+
+    def _stamp(self):
+        """The text put before a line: the date and time once the badge knows them, else the seconds
+        since the terminal was opened."""
+        if clock_set():
+            t = time.localtime()
+            return b"[%04d-%02d-%02d %02d:%02d:%02d] " % tuple(t[:6])
+        return b"[+%.3f] " % (time.ticks_diff(time.ticks_ms(), self._t0) / 1000)
+
+    def _stamped(self, data):
+        """data with a stamp inserted at the start of each line, whichever chunk the line arrives in.
+        Blank lines are left bare."""
+        if not self.stamp:
+            return data
+        if not self._bol and b"\n" not in data:   # the middle of a line: nothing to insert
+            return data
+        stamp = self._stamp()
+        out = bytearray()
+        for c in data:
+            if self._bol and c != 10 and c != 13:
+                out.extend(stamp)
+                self._bol = False
+            out.append(c)
+            if c == 10:
+                self._bol = True
+        return bytes(out)
 
     def _start_log(self, app):
         """Open a new numbered file; from now on everything received is appended to it."""
@@ -533,11 +573,12 @@ class SerialTile(ListTile):
             data = self.uart.read()
             if data:
                 self.rx_bytes += len(data)
-                self.raw.extend(data)
+                text = self._stamped(data)   # what the saved text holds; the screen shows the bare data
+                self.raw.extend(text)
                 if len(self.raw) > self.RAWMAX:
                     self.raw = self.raw[-self.RAWMAX:]   # a bytearray cannot delete a slice here
                 if self.logfile is not None:
-                    self._log(app, data)
+                    self._log(app, text)
                 self._feed(data)
                 app.link.leds.pulse(RX)
         except Exception as e:   # whatever goes wrong with the data must not take the buttons down too
@@ -550,7 +591,7 @@ class SerialTile(ListTile):
             self.scroll = max(0, self.scroll - 1)
         elif b.pressed(BUTTON_TYPES["LEFT"]):
             self.lines, self.scroll = [""], 0
-            self.raw = bytearray()
+            self.raw, self._bol = bytearray(), True
         self._right(app, b, delta)
 
     def _right(self, app, b, delta):
@@ -578,7 +619,7 @@ class SerialTile(ListTile):
             return
 
         def write():
-            path = next_log_path()
+            path = next_log_path("snap_")
             with open(path, "wb") as f:
                 f.write(self.raw)
             app.note("Saved %d bytes to %s" % (len(self.raw), path))
